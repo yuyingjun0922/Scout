@@ -7,7 +7,7 @@ infra/mcp_server.py — v1.66 Phase 1 Step 10 MCP Server
 传输：stdio（子进程管道，无需网络端口；`scout` 作为 server 名注册）
 SDK：`mcp` (pip install mcp) — FastMCP 装饰器驱动
 
-Phase 1 工具 (10 个) + v1.03 master_analysis + v1.04 bias_check + v1.07 recommend_stock：
+Phase 1 工具 (10 个) + v1.03 master_analysis + v1.04 bias_check + v1.07 recommend_stock + v1.08 get_motivation_status：
 
     查询类（只读）：
         (a) get_watchlist                 列出 active 行业
@@ -641,6 +641,35 @@ class ScoutToolImpl:
             _impl,
         )
 
+    # ════════════ (m) get_motivation_status (v1.08) ════════════
+
+    def get_motivation_status(
+        self, industry: str, refresh: bool = False
+    ) -> Dict[str, Any]:
+        """v1.08 动机漂移状态。
+
+        - refresh=False（默认）→ 直接读 watchlist.motivation_drift（最近一次批检测的快照）
+        - refresh=True          → 立即触发 MotivationDriftAgent.detect(industry)，返回带 4 信号明细
+        永不抛。
+        """
+        def _impl() -> Dict[str, Any]:
+            if not isinstance(industry, str) or not industry.strip():
+                return {"ok": False, "error": "industry must be non-empty str"}
+            ind = industry.strip()
+            from agents.motivation_drift_agent import MotivationDriftAgent
+            agent = MotivationDriftAgent(self.db)
+            if refresh:
+                detection = agent.detect(ind)
+                if detection.get("error"):
+                    return {"ok": False, "industry": ind, **detection}
+                return {"ok": True, **detection}
+            return agent.get_status(ind)
+        return self._call(
+            "get_motivation_status",
+            {"industry": industry, "refresh": refresh},
+            _impl,
+        )
+
     # ════════════ (k) bias_check ════════════
 
     def bias_check(self, result_json: str, stage: str) -> Dict[str, Any]:
@@ -982,6 +1011,17 @@ def build_server(impl: "ScoutToolImpl") -> Any:
     ))
     def recommend_stock(stock_code: str, counter: bool = False) -> dict:
         return impl.recommend_stock(stock_code=stock_code, counter=counter)
+
+    @app.tool(description=(
+        "v1.08 动机漂移状态：返回某行业当前的 motivation_drift 标签。"
+        "默认从 watchlist 读最近一次批检测的快照（轻）；refresh=true 立即触发 "
+        "MotivationDriftAgent.detect 并返回 4 信号明细 (政策/关键词/财务/冲突)。"
+        "参数：industry (必选, str)；refresh (可选, bool, 默认 false)。"
+        "返回 {ok, industry, state(stable|drifting|reversing), signals[], "
+        "last_drift_at, motivation_uncertainty}。永不抛，数据缺失 → state=stable。"
+    ))
+    def get_motivation_status(industry: str, refresh: bool = False) -> dict:
+        return impl.get_motivation_status(industry=industry, refresh=refresh)
 
     return app
 

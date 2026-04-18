@@ -78,7 +78,7 @@ def _seed_industry(
     industry: str = "AI算力",
     industry_id: int = 1,
     *,
-    motivation_uncertainty: str | None = "low",
+    motivation_drift: str | None = "stable",
     gap_fillability: int | None = 4,
 ):
     db.write(
@@ -90,9 +90,9 @@ def _seed_industry(
     db.write(
         """INSERT INTO watchlist
            (industry_id, industry_name, zone, source_type, early_signal,
-            motivation_uncertainty, gap_fillability)
+            motivation_drift, gap_fillability)
            VALUES (?, ?, 'active', 'manual', 0, ?, ?)""",
-        (industry_id, industry, motivation_uncertainty, gap_fillability),
+        (industry_id, industry, motivation_drift, gap_fillability),
     )
 
 
@@ -332,31 +332,37 @@ class TestD1PolicyFunding:
 
 
 class TestD2Motivation:
-    def test_low_uncertainty_stable(self, tmp_db, agent):
-        _seed_industry(tmp_db, motivation_uncertainty="low")
+    def test_stable_drift_high_score(self, tmp_db, agent):
+        _seed_industry(tmp_db, motivation_drift="stable")
         d = agent._d2_motivation_persistence("AI算力")
         assert d.score == 100
         assert d.evidence["label"] == "stable"
+        assert d.evidence["motivation_drift"] == "stable"
 
-    def test_medium_uncertainty_drifting(self, tmp_db, agent):
-        _seed_industry(tmp_db, motivation_uncertainty="medium")
+    def test_drifting_state_50(self, tmp_db, agent):
+        _seed_industry(tmp_db, motivation_drift="drifting")
         d = agent._d2_motivation_persistence("AI算力")
         assert d.score == 50
         assert d.evidence["label"] == "drifting"
 
-    def test_high_uncertainty_reversing(self, tmp_db, agent):
-        _seed_industry(tmp_db, motivation_uncertainty="high")
+    def test_reversing_state_0(self, tmp_db, agent):
+        _seed_industry(tmp_db, motivation_drift="reversing")
         d = agent._d2_motivation_persistence("AI算力")
         assert d.score == 0
         assert d.evidence["label"] == "reversing"
 
     def test_missing_default_75(self, tmp_db, agent):
-        _seed_industry(tmp_db, motivation_uncertainty=None)
+        _seed_industry(tmp_db, motivation_drift=None)
         d = agent._d2_motivation_persistence("AI算力")
         assert d.score == 75
 
     def test_no_industry(self, agent):
         d = agent._d2_motivation_persistence(None)
+        assert d.score == 75
+
+    def test_unknown_label_default_75(self, tmp_db, agent):
+        _seed_industry(tmp_db, motivation_drift="unknown_value")
+        d = agent._d2_motivation_persistence("AI算力")
         assert d.score == 75
 
 
@@ -531,7 +537,7 @@ class TestAnalyze:
         assert out["level"] == LEVEL_REJECT
 
     def test_analyze_full_industry_path_no_financials(self, tmp_db, agent):
-        _seed_industry(tmp_db, gap_fillability=4, motivation_uncertainty="low")
+        _seed_industry(tmp_db, gap_fillability=4, motivation_drift="stable")
         _seed_stock(tmp_db, "600001")
         out = agent.analyze("600001")
         assert out["ok"]
@@ -562,7 +568,7 @@ class TestAnalyze:
     def test_analyze_high_score_path_b_or_a(self, tmp_db, agent):
         # 注入完美数据：政策 funded、stable、gap=5、5+ V1 信号、Z safe + PEG cheap
         _seed_industry(
-            tmp_db, gap_fillability=5, motivation_uncertainty="low",
+            tmp_db, gap_fillability=5, motivation_drift="stable",
         )
         _seed_stock(tmp_db, "600100")
         _seed_info_unit(
@@ -682,7 +688,7 @@ class TestScoring:
 
     def test_score_clamped_to_100(self, tmp_db, agent):
         _seed_industry(
-            tmp_db, gap_fillability=5, motivation_uncertainty="low",
+            tmp_db, gap_fillability=5, motivation_drift="stable",
         )
         _seed_stock(tmp_db, "600001")
         _seed_info_unit(

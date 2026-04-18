@@ -72,6 +72,7 @@ CREATE TABLE IF NOT EXISTS watchlist (
     motivation_detail TEXT,                 -- v1.54 JSON
     motivation_uncertainty TEXT,            -- low/medium/high
     motivation_last_drift_at TEXT,          -- UTC
+    motivation_drift TEXT DEFAULT 'stable', -- v1.08: stable/drifting/reversing
     -- 缺口分析（v1.50+v1.55）
     gap_analysis TEXT,                      -- JSON
     gap_status TEXT DEFAULT 'active',       -- active/closing/closed/no_gap

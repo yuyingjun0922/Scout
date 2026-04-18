@@ -330,6 +330,28 @@ class ScoutRunner:
         except Exception as e:
             self._handle_failure("recommend_batch", e)
 
+    async def job_motivation_drift(self) -> None:
+        """v1.08：每日 05:00 KST 跑 MotivationDriftAgent，更新 watchlist.motivation_drift。"""
+        self.logger.info("[motivation:drift] starting")
+        try:
+            from agents.motivation_drift_agent import MotivationDriftAgent
+            agent = MotivationDriftAgent(self.kdb)
+            result = await self._run_in_thread(agent.run)
+            if result is None:
+                self.logger.warning("[motivation:drift] agent returned None")
+                self._handle_failure(
+                    "motivation_drift", RuntimeError("returned None")
+                )
+                return
+            self.logger.info(
+                f"[motivation:drift] processed={result['processed']} "
+                f"stable={result['stable']} drifting={result['drifting']} "
+                f"reversing={result['reversing']}"
+            )
+            self._clear_failure("motivation_drift")
+        except Exception as e:
+            self._handle_failure("motivation_drift", e)
+
     async def job_financial_refresh(self) -> None:
         """周任务：刷新 A 股 stock_financials（Z'' + PEG）。失败计入 agent_errors。"""
         self.logger.info("[financial:refresh] starting")
@@ -602,6 +624,15 @@ class ScoutRunner:
             self.job_recommend_batch,
             CronTrigger(day_of_week="mon,thu", hour=9, minute=0, timezone=KST),
             id="recommend_batch",
+            replace_existing=True, max_instances=1,
+            misfire_grace_time=3600,
+        )
+
+        # v1.08：动机漂移检测（每日 05:00 KST，先于 recommend_batch 跑）
+        self.scheduler.add_job(
+            self.job_motivation_drift,
+            CronTrigger(hour=5, minute=0, timezone=KST),
+            id="motivation_drift",
             replace_existing=True, max_instances=1,
             misfire_grace_time=3600,
         )
@@ -1040,6 +1071,103 @@ def cmd_recommend(
         kdb.close()
 
 
+def cmd_motivation_drift(
+    *,
+    industry: Optional[str],
+    refresh: bool,
+    kdb_path: Path,
+    logger: logging.Logger,
+) -> int:
+    """v1.08 动机漂移检测。
+
+    无 --industry：跑全量 batch（更新所有 active 行业）。
+    带 --industry：单行业；--refresh 触发重新检测（默认只读快照）。
+    """
+    import json as _json
+
+    from agents.motivation_drift_agent import MotivationDriftAgent
+    from infra.db_manager import DatabaseManager
+
+    if sys.stdout.encoding and sys.stdout.encoding.lower() != "utf-8":
+        try:
+            sys.stdout.reconfigure(encoding="utf-8")
+        except Exception:
+            pass
+
+    kdb = DatabaseManager(kdb_path)
+    try:
+        agent = MotivationDriftAgent(kdb)
+        if industry:
+            if refresh:
+                out = agent.detect(industry)
+                # detect 返回的是 to_dict() 后的 dict（state/signals/...）
+                # persist：CLI 触发的 refresh 也写回，方便用户看完即生效
+                from agents.motivation_drift_agent import (
+                    DriftDetection, SignalResult,
+                )
+                if "error" not in out and "signals" in out:
+                    sig_objs = [
+                        SignalResult(
+                            name=s["name"], state=s["state"],
+                            note=s["note"], evidence=s["evidence"],
+                        )
+                        for s in out["signals"]
+                    ]
+                    agent._persist(DriftDetection(
+                        industry=out["industry"],
+                        state=out["state"],
+                        signals=sig_objs,
+                        detected_at=out["detected_at"],
+                    ))
+                print(_json.dumps(out, ensure_ascii=False, indent=2))
+                logger.info(
+                    f"[cli:motivation-drift] {industry} state={out.get('state')} "
+                    f"triggered={out.get('triggered')}"
+                )
+            else:
+                out = agent.get_status(industry)
+                print(_json.dumps(out, ensure_ascii=False, indent=2))
+                logger.info(
+                    f"[cli:motivation-drift] {industry} (snapshot) "
+                    f"state={out.get('state')}"
+                )
+            return 0 if out.get("ok", True) else 1
+        # batch
+        result = agent.run()
+        if result is None:
+            logger.error("[cli:motivation-drift] agent.run() returned None")
+            return 1
+        summary = {k: v for k, v in result.items() if k != "results"}
+        print(_json.dumps(summary, ensure_ascii=False, indent=2))
+        print()
+        print("=== Triggered (drifting / reversing) ===")
+        triggered = [
+            r for r in result["results"]
+            if r.get("state") in ("drifting", "reversing")
+        ]
+        if not triggered:
+            print("  (none — all stable)")
+        for r in triggered:
+            tagged = ",".join(r.get("triggered", []))
+            print(
+                f"  [{r.get('state','?'):<10}] {r.get('industry')} "
+                f"signals={tagged}"
+            )
+        logger.info(
+            f"[cli:motivation-drift] processed={result['processed']} "
+            f"stable={result['stable']} drifting={result['drifting']} "
+            f"reversing={result['reversing']}"
+        )
+        return 0
+    except Exception as e:
+        logger.error(
+            f"[cli:motivation-drift] failed: {type(e).__name__}: {e}"
+        )
+        return 1
+    finally:
+        kdb.close()
+
+
 def cmd_report(
     report_type: str,
     *,
@@ -1188,6 +1316,19 @@ def build_arg_parser() -> argparse.ArgumentParser:
         help="只输出反方卡片（counter card），需配合 --symbol",
     )
 
+    drift_p = sub.add_parser(
+        "motivation-drift",
+        help="v1.08 动机漂移检测（更新 watchlist.motivation_drift）",
+    )
+    drift_p.add_argument(
+        "--industry", default=None,
+        help="单行业；不传则跑全量 watchlist active",
+    )
+    drift_p.add_argument(
+        "--refresh", action="store_true",
+        help="单行业模式下立即重新检测（默认只读快照）",
+    )
+
     return parser
 
 
@@ -1292,6 +1433,14 @@ def main(argv: Optional[List[str]] = None) -> int:
         return cmd_recommend(
             symbol=args.symbol,
             counter=args.counter,
+            kdb_path=paths["kdb_path"],
+            logger=logger,
+        )
+
+    if args.command == "motivation-drift":
+        return cmd_motivation_drift(
+            industry=args.industry,
+            refresh=args.refresh,
             kdb_path=paths["kdb_path"],
             logger=logger,
         )

@@ -30,7 +30,7 @@ agents/recommendation_agent.py — 推荐 Agent (v1.07 Phase 2A 决策层)
   - stock_financials 缺失   → d5=50, 标 "数据不足"
   - policy_funding_type 缺  → d1 默认 directive=25
   - watchlist.gap_fillability 缺 → d3=50
-  - watchlist.motivation_uncertainty 缺 → d2=75
+  - watchlist.motivation_drift 缺 → d2=75（v1.08 由 MotivationDriftAgent 维护）
   - 任何子项数据缺失不阻塞流程，标 reasons 字段
 """
 from __future__ import annotations
@@ -539,33 +539,45 @@ class RecommendationAgent(BaseAgent):
     def _d2_motivation_persistence(
         self, industry: Optional[str]
     ) -> DimensionScore:
-        """d2 动机持续性。industry_dict 无 motivation_drift 列，用 watchlist.motivation_uncertainty 代理。"""
+        """d2 动机持续性。读 watchlist.motivation_drift（v1.08 由 MotivationDriftAgent 写入）。
+
+        映射：stable=100 / drifting=50 / reversing=0；
+        缺 industry 或字段为空 → 默认 stable=75（保守，等 drift agent 补齐）。
+        """
         w = WEIGHTS["d2"]
         default_score = 75
         if not industry:
             return _make_dim("d2", default_score, w, "缺 industry，默认 stable=75", {})
         try:
             row = self.db.query_one(
-                "SELECT motivation_uncertainty, motivation_levels FROM watchlist WHERE industry_name = ?",
+                """SELECT motivation_drift, motivation_last_drift_at,
+                          motivation_uncertainty, motivation_levels
+                   FROM watchlist WHERE industry_name = ?""",
                 (industry,),
             )
         except sqlite3.Error as e:
             self.logger.warning(f"_d2 query error: {e}")
             row = None
-        if not row or row["motivation_uncertainty"] is None:
+        if not row or row["motivation_drift"] is None:
             return _make_dim(
                 "d2", default_score, w,
-                "watchlist.motivation_uncertainty 缺失，默认 stable=75", {},
+                "watchlist.motivation_drift 缺失，默认 stable=75", {},
             )
-        unc = (row["motivation_uncertainty"] or "").lower()
-        mapping = {"low": (100, "stable"), "medium": (50, "drifting"), "high": (0, "reversing")}
-        score, label = mapping.get(unc, (default_score, "unknown"))
+        drift = (row["motivation_drift"] or "").lower()
+        mapping = {
+            "stable": (100, "stable"),
+            "drifting": (50, "drifting"),
+            "reversing": (0, "reversing"),
+        }
+        score, label = mapping.get(drift, (default_score, "unknown"))
         evidence = {
-            "motivation_uncertainty": unc,
+            "motivation_drift": drift,
+            "motivation_last_drift_at": row["motivation_last_drift_at"],
+            "motivation_uncertainty": row["motivation_uncertainty"],
             "motivation_levels": row["motivation_levels"],
             "label": label,
         }
-        return _make_dim("d2", score, w, f"动机={label} (uncertainty={unc})", evidence)
+        return _make_dim("d2", score, w, f"动机={label} (drift={drift})", evidence)
 
     def _d3_gap_fillability(self, industry: Optional[str]) -> DimensionScore:
         """d3 真实缺口存在。watchlist.gap_fillability 1-5。"""

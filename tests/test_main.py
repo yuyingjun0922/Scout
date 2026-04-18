@@ -21,7 +21,7 @@ tests/test_main.py — main.py CLI + ScoutRunner 测试矩阵
     ScoutRunner：
         - _handle_failure 累计 → 到阈值推 alert（Mock push_queue）
         - _clear_failure 清计数
-        - schedule_all 注册 9 个 job
+        - schedule_all 注册 12 个 job
         - run(max_runtime_seconds=0.3) 快速启停
         - 信号处理器模拟（手动 set shutdown_event → run 应返回）
     Print utils：
@@ -615,7 +615,7 @@ class TestScoutRunnerFailureCounter:
 
 class TestScoutRunnerSchedule:
     def test_schedule_all_registers_jobs(self, bootstrapped, tmp_logger):
-        """验证 11 个 job 全部被注册（D1/D4/V1/V3/S4 + 2 周报 + daily + financial + recommend + heartbeat）"""
+        """验证 12 个 job 全部被注册（D1/D4/V1/V3/S4 + 2 周报 + daily + financial + recommend + motivation_drift + heartbeat）"""
         from apscheduler.schedulers.asyncio import AsyncIOScheduler
         from infra.db_manager import DatabaseManager
         from infra.queue_manager import QueueManager
@@ -635,7 +635,7 @@ class TestScoutRunnerSchedule:
                 "collect_V3", "collect_S4",
                 "weekly_industry_report", "weekly_paper_report",
                 "daily_briefing", "financial_refresh",
-                "recommend_batch", "heartbeat",
+                "recommend_batch", "motivation_drift", "heartbeat",
             }
             assert job_ids == expected
         finally:
