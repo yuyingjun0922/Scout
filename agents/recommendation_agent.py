@@ -475,14 +475,17 @@ class RecommendationAgent(BaseAgent):
     # ─────────────── 阶段 2：6 维度 ───────────────
 
     def _d1_policy_funding(self, industry: Optional[str]) -> DimensionScore:
-        """d1 政策含金量。
+        """d1 政策含金量（v1.09 增强：NULL direction 走轻量关键词推断）。
 
-        无 policy_funding_type 字段，用 policy_direction supportive 数 + 关键词
-        启发式：
-          - 'funded'  : content 含"专项资金/补贴/拨款" → 100
-          - 'mandatory': content 含"必须/强制/规定/要求" → 75
-          - 默认 directive (supportive 但无强制资金) → 25
-          - 无任何 supportive 信号 → 0
+        分级（取最高一档）：
+          funded(100)              — content 含"财政/专项/补贴/基金/投入/资金/万亿/亿元/预算..."
+          mandatory(75)            — content 含"必须/强制/应当/不得/责令/规定/要求"
+          supportive(50)           — direction='supportive' OR NULL+content含"支持/推动/培育/打造/促进/加快/鼓励/加大/强化"
+          presumed_supportive(30)  — direction=NULL，content 既无 support 也无 restrict 关键词
+          default_directive(25)    — 0 候选记录或仅有 restrictive
+
+        SKIP 规则：direction='restrictive'，或 direction=NULL 且 content 仅含 restrictive_kw
+        （政策反对的不计入）。
         """
         w = WEIGHTS["d1"]
         if not industry:
@@ -503,34 +506,71 @@ class RecommendationAgent(BaseAgent):
             self.logger.warning(f"_d1 query error: {e}")
             rows = []
 
-        funded_kw = ["专项资金", "补贴", "拨款", "财政支持", "重大专项"]
-        mandatory_kw = ["必须", "强制", "应当", "不得", "禁止外的合规要求"]
-        funded = mandatory = supportive = 0
+        funded_kw = [
+            "财政", "专项", "补贴", "基金", "投入", "资金", "万亿", "亿元", "预算",
+            "拨款", "财政支持", "重大专项", "专项资金",
+        ]
+        mandatory_kw = ["必须", "强制", "应当", "不得", "责令", "规定", "要求"]
+        support_kw = ["支持", "推动", "培育", "打造", "促进", "加快", "鼓励", "加大", "强化"]
+        restrict_kw = ["严控", "退出", "清退", "整治", "限制", "禁止", "取缔", "停止", "淘汰"]
+
+        funded = mandatory = supportive = presumed = skipped = 0
         for r in rows:
             content = r["content"] or ""
             direction = (r["policy_direction"] or "").lower()
-            if direction != "supportive":
+
+            # restrictive 直接跳过
+            if direction == "restrictive":
+                skipped += 1
                 continue
-            supportive += 1
-            if any(k in content for k in funded_kw):
+
+            if direction == "supportive":
+                if any(k in content for k in funded_kw):
+                    funded += 1
+                elif any(k in content for k in mandatory_kw):
+                    mandatory += 1
+                else:
+                    supportive += 1
+                continue
+
+            # direction is None / unknown → 关键词推断
+            has_support = any(k in content for k in support_kw)
+            has_restrict = any(k in content for k in restrict_kw)
+            if has_support:
+                if any(k in content for k in funded_kw):
+                    funded += 1
+                elif any(k in content for k in mandatory_kw):
+                    mandatory += 1
+                else:
+                    supportive += 1
+            elif has_restrict:
+                skipped += 1
+            elif any(k in content for k in funded_kw):
+                # 没 support_kw 但有 funded_kw（如"财政支持城市更新"）也升级 funded
                 funded += 1
             elif any(k in content for k in mandatory_kw):
                 mandatory += 1
+            else:
+                presumed += 1
 
         if funded > 0:
             score, level = 100, "funded"
         elif mandatory > 0:
             score, level = 75, "mandatory"
         elif supportive > 0:
-            score, level = 25, "directive"
+            score, level = 50, "supportive"
+        elif presumed > 0:
+            score, level = 30, "presumed_supportive"
         else:
-            score, level = 25, "default_directive"  # 数据缺失时默认 25
+            score, level = 25, "default_directive"
 
         note = f"政策含金量={level} ({score}/100)"
         evidence = {
             "supportive_count": supportive,
             "funded_count": funded,
             "mandatory_count": mandatory,
+            "presumed_count": presumed,
+            "skipped_restrictive_count": skipped,
             "lookback_days": POLICY_LOOKBACK_DAYS,
             "level": level,
         }

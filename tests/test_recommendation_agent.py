@@ -310,15 +310,17 @@ class TestD1PolicyFunding:
         assert d.score == 75
         assert d.evidence["mandatory_count"] == 1
 
-    def test_directive_only(self, tmp_db, agent):
+    def test_supportive_only(self, tmp_db, agent):
+        """v1.09: direction=supportive 但无 funded/mandatory 关键词 → 50（旧版 25）。"""
         _seed_industry(tmp_db)
         _seed_info_unit(
             tmp_db, uid="x1", direction="supportive",
             content="鼓励发展 AI 算力",
         )
         d = agent._d1_policy_funding("AI算力")
-        assert d.score == 25
-        assert d.evidence["level"] == "directive"
+        assert d.score == 50
+        assert d.evidence["level"] == "supportive"
+        assert d.evidence["supportive_count"] == 1
 
     def test_no_data_default_directive(self, tmp_db, agent):
         _seed_industry(tmp_db)
@@ -329,6 +331,98 @@ class TestD1PolicyFunding:
     def test_no_industry(self, agent):
         d = agent._d1_policy_funding(None)
         assert d.score == 25
+
+    # v1.09 NULL-direction 推断
+    def test_null_direction_with_support_kw(self, tmp_db, agent):
+        """direction=NULL + content 含 support_kw → 算 supportive (50)。"""
+        _seed_industry(tmp_db)
+        _seed_info_unit(
+            tmp_db, uid="n1", direction=None,
+            content="国务院关于推动 AI 算力发展的意见",
+        )
+        d = agent._d1_policy_funding("AI算力")
+        assert d.score == 50
+        assert d.evidence["level"] == "supportive"
+        assert d.evidence["supportive_count"] == 1
+
+    def test_null_direction_with_funded_kw(self, tmp_db, agent):
+        """direction=NULL + content 含 funded_kw（即使有 support_kw）→ funded(100)。"""
+        _seed_industry(tmp_db)
+        _seed_info_unit(
+            tmp_db, uid="n2", direction=None,
+            content="中央财政支持城市更新（含 AI 算力基础设施）",
+        )
+        d = agent._d1_policy_funding("AI算力")
+        assert d.score == 100
+        assert d.evidence["funded_count"] == 1
+
+    def test_null_direction_with_funded_kw_only(self, tmp_db, agent):
+        """direction=NULL + 只有 funded_kw（无 support_kw）→ 仍 funded(100)。"""
+        _seed_industry(tmp_db)
+        _seed_info_unit(
+            tmp_db, uid="n2b", direction=None,
+            content="2026 年度专项资金安排（AI 算力基础设施）",
+        )
+        d = agent._d1_policy_funding("AI算力")
+        assert d.score == 100
+        assert d.evidence["funded_count"] == 1
+
+    def test_null_direction_with_restrict_only(self, tmp_db, agent):
+        """direction=NULL + 只有 restrict_kw → SKIP，d1=25。"""
+        _seed_industry(tmp_db)
+        _seed_info_unit(
+            tmp_db, uid="n3", direction=None,
+            content="严控 AI 算力盲目扩张，禁止低水平重复建设",
+        )
+        d = agent._d1_policy_funding("AI算力")
+        assert d.score == 25
+        assert d.evidence["level"] == "default_directive"
+        assert d.evidence["skipped_restrictive_count"] == 1
+
+    def test_null_direction_neither_kw(self, tmp_db, agent):
+        """direction=NULL + 既无 support 也无 restrict → presumed(30)。"""
+        _seed_industry(tmp_db)
+        _seed_info_unit(
+            tmp_db, uid="n4", direction=None,
+            content="关于统筹城乡就业政策体系的意见",
+        )
+        d = agent._d1_policy_funding("AI算力")
+        assert d.score == 30
+        assert d.evidence["level"] == "presumed_supportive"
+        assert d.evidence["presumed_count"] == 1
+
+    def test_restrictive_skipped(self, tmp_db, agent):
+        """direction='restrictive' → SKIP，d1=25 (default_directive)。"""
+        _seed_industry(tmp_db)
+        _seed_info_unit(
+            tmp_db, uid="r1", direction="restrictive",
+            content="严禁 AI 算力低水平重复",
+        )
+        d = agent._d1_policy_funding("AI算力")
+        assert d.score == 25
+        assert d.evidence["level"] == "default_directive"
+        assert d.evidence["skipped_restrictive_count"] == 1
+
+    def test_mixed_records_takes_highest(self, tmp_db, agent):
+        """多条记录混合时取最高 tier。funded > supportive > presumed。"""
+        _seed_industry(tmp_db)
+        _seed_info_unit(
+            tmp_db, uid="m1", direction=None,
+            content="国务院推动 AI 算力发展",
+        )  # supportive
+        _seed_info_unit(
+            tmp_db, uid="m2", direction=None,
+            content="财政部安排 AI 算力专项资金",
+        )  # funded
+        _seed_info_unit(
+            tmp_db, uid="m3", direction="restrictive",
+            content="严禁 AI 算力盲目建设",
+        )  # skipped
+        d = agent._d1_policy_funding("AI算力")
+        assert d.score == 100
+        assert d.evidence["funded_count"] == 1
+        assert d.evidence["supportive_count"] == 1
+        assert d.evidence["skipped_restrictive_count"] == 1
 
 
 class TestD2Motivation:
