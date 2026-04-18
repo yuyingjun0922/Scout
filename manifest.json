@@ -1,0 +1,22 @@
+{
+  "manifest_version": "0.2",
+  "name": "scout",
+  "display_name": "Scout Investment Analysis",
+  "version": "1.0.0",
+  "description": "Scout - Personal investment analysis system with Chinese/Korean policy tracking",
+  "author": {
+    "name": "Scout User"
+  },
+  "server": {
+    "type": "python",
+    "entry_point": "main.py",
+    "mcp_config": {
+      "command": "C:\\Users\\13700F\\AppData\\Local\\Programs\\Python\\Python312\\python.exe",
+      "args": ["${__dirname}/main.py", "mcp"],
+      "env": {
+        "PYTHONIOENCODING": "utf-8",
+        "SCOUT_DB_PATH": "${__dirname}/data/knowledge.db"
+      }
+    }
+  }
+}

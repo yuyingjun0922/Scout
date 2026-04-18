@@ -1,0 +1,28 @@
+# Scout Phase 1 依赖清单
+# 安装：pip install -r requirements.txt
+# Python >= 3.12 建议（zoneinfo + pydantic v2）
+
+# ══ 核心 ══
+pydantic>=2.0           # contracts/ pydantic v2 严格契约
+pyyaml                  # config.yaml / cold_start_config.yaml 加载
+httpx                   # 网络采集（gov.cn / S2 / arxiv / Ollama ping）
+tzdata                  # Windows：zoneinfo.ZoneInfo("Asia/Seoul") 的数据源
+
+# ══ 数据采集 ══
+akshare                 # S4：A 股行情 + 财务
+feedparser              # D4：arXiv Atom/RSS
+beautifulsoup4          # D1：gov.cn HTML 清理
+
+# ══ LLM ══
+ollama                  # Step 7 / 9：Gemma 3 本地推理（http://localhost:11434）
+anthropic               # Phase 2A 启用（cloud_model=claude-sonnet-4-6）；Phase 1 占位
+
+# ══ 对外接口 ══
+mcp                     # Step 10：MCP stdio server / client SDK
+
+# ══ 调度 ══
+apscheduler>=3.10       # Step 12：main.py serve 模式调度器（AsyncIOScheduler）
+
+# ══ 测试 ══
+pytest                  # 测试框架（1031+ tests）
+pytest-asyncio          # Step 9 / 10 / 12 异步测试

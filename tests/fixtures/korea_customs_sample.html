@@ -1,0 +1,90 @@
+<!DOCTYPE html>
+<html lang="ko">
+<head>
+  <meta charset="utf-8">
+  <title>수출입 품목 통계 - HS 8542</title>
+</head>
+<body>
+<!--
+  手工 fixture：Scout 自定义的期望 HTML 结构。
+  真实 UniPass/tradedata.go.kr 为 JS-driven，纯 HTTP 拿不到表格数据——
+  这份 fixture 仅用于测试 _parse_trade_html 的契约行为。
+  现实数据结构可能完全不同；爬虫若最终通过 Playwright/API 接入，
+  需要重写 _parse_trade_html（parser 契约保持）。
+-->
+
+<div class="stats-container" data-hs-code="8542">
+  <h2>반도체 집적회로 (HS 8542) 월별 수출입</h2>
+
+  <table class="monthly-data">
+    <thead>
+      <tr>
+        <th>기간</th>
+        <th>수출금액(USD)</th>
+        <th>수입금액(USD)</th>
+        <th>수출수량(KG)</th>
+        <th>수출전년동월대비(%)</th>
+      </tr>
+    </thead>
+    <tbody>
+      <tr>
+        <td>2025.10</td>
+        <td>9,500,000,000</td>
+        <td>950,000,000</td>
+        <td>7,500,000</td>
+        <td>+8.4%</td>
+      </tr>
+      <tr>
+        <td>2025.11</td>
+        <td>10,200,000,000</td>
+        <td>1,050,000,000</td>
+        <td>7,900,000</td>
+        <td>+11.2%</td>
+      </tr>
+      <tr>
+        <td>2025.12</td>
+        <td>10,800,000,000</td>
+        <td>1,100,000,000</td>
+        <td>8,200,000</td>
+        <td>+13.1%</td>
+      </tr>
+      <tr>
+        <td>2026.01</td>
+        <td>10,100,000,000</td>
+        <td>1,020,000,000</td>
+        <td>7,950,000</td>
+        <td>+9.7%</td>
+      </tr>
+      <tr>
+        <td>2026.02</td>
+        <td>10,500,000,000</td>
+        <td>1,080,000,000</td>
+        <td>8,100,000</td>
+        <td>+10.3%</td>
+      </tr>
+      <tr>
+        <td>2026.03</td>
+        <td>12,345,678,901</td>
+        <td>1,234,567,890</td>
+        <td>9,876,543</td>
+        <td>+15.3%</td>
+      </tr>
+    </tbody>
+  </table>
+
+  <table class="top-countries">
+    <caption>2026년 3월 주요 수출국 Top 5</caption>
+    <thead>
+      <tr><th>국가</th><th>수출금액(USD)</th></tr>
+    </thead>
+    <tbody>
+      <tr><td>CN</td><td>5,000,000,000</td></tr>
+      <tr><td>US</td><td>3,200,000,000</td></tr>
+      <tr><td>VN</td><td>1,800,000,000</td></tr>
+      <tr><td>HK</td><td>1,300,000,000</td></tr>
+      <tr><td>TW</td><td>900,000,000</td></tr>
+    </tbody>
+  </table>
+</div>
+</body>
+</html>

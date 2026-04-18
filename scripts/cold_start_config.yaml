@@ -1,0 +1,229 @@
+# Scout Phase 1 冷启动配置
+# 用户：韩国中长期价值投资者，资金 ₩1-3 亿，3-5 年持有，A+KR+US 三市场
+#
+# 读法：
+#   industries    → watchlist  表（14 active + 1 observation = 15 行）
+#   holdings      → track_list 表
+#   principles    → system_meta(key='user_principles')  JSON 数组
+#   user_context  → system_meta(key='user_context')     JSON 对象
+#   meta          → 生成元数据（不落库，仅用于对账）
+#
+# 用法：
+#   python scripts/cold_start.py --yes                           # 非交互
+#   python scripts/cold_start.py --interactive                   # 交互补填
+#   python scripts/cold_start.py --dry-run                       # 预览不写
+#
+# 幂等：重复跑会 UPSERT
+#   - watchlist：industry_name 存在 → UPDATE 字段
+#   - system_meta(user_principles / user_context)：INSERT OR REPLACE
+
+# ══════════════════════ 15 个关注行业 ══════════════════════
+
+industries:
+  # ─── A 类：核心 4（政策驱动+跨市场联动）───
+  - name: "半导体设备"
+    sub_industries: ["光刻", "刻蚀", "沉积", "测试"]
+    zone: "active"
+    motivation_tags: ["1_国家安全", "2_技术主权"]
+    primary_market: "CN+KR+US"
+    notes: "跨市场联动最强，Scout独特价值核心"
+
+  - name: "HBM"
+    sub_industries: ["HBM3", "HBM4", "CoWoS"]
+    zone: "active"
+    motivation_tags: ["2_技术主权", "1_国家安全"]
+    primary_market: "KR+US"
+    notes: "SK海力士/三星核心，韩国视角关键"
+
+  - name: "医疗器械国产替代"
+    sub_industries: ["高端影像", "植入物", "IVD"]
+    zone: "active"
+    motivation_tags: ["1_国家安全", "4_经济转型"]
+    primary_market: "CN"
+    notes: "老龄化+政策刚需"
+
+  - name: "工业自动化"
+    sub_industries: ["协作机器人", "工业软件"]
+    zone: "active"
+    motivation_tags: ["3_社会稳定"]
+    primary_market: "CN+US"
+    notes: "劳动力成本驱动，长期确定性高"
+
+  # ─── B 类：AI+算力 3 ───
+  - name: "AI算力"
+    sub_industries: ["GPU", "ASIC", "互联芯片"]
+    zone: "active"
+    motivation_tags: ["窗口博弈"]
+    primary_market: "US"
+    notes: "短期窗口，关注估值+技术拐点"
+
+  - name: "AI应用软件"
+    sub_industries: ["企业SaaS", "垂直AI"]
+    zone: "active"
+    motivation_tags: ["窗口博弈"]
+    primary_market: "US"
+    notes: "商业化落地验证期"
+
+  - name: "数据中心配套"
+    sub_industries: ["电源", "液冷", "变压器"]
+    zone: "active"
+    motivation_tags: ["4_经济转型"]
+    primary_market: "CN+KR+US"
+    notes: "AI算力的上游受益者"
+
+  # ─── C 类：能源转型 3 ───
+  - name: "核电"
+    sub_industries: ["反应堆", "铀矿", "装备"]
+    zone: "active"
+    motivation_tags: ["1_国家安全", "4_经济转型"]
+    primary_market: "CN+US"
+    notes: "长周期国家战略"
+
+  - name: "特高压"
+    sub_industries: ["变压器", "GIS", "互感器"]
+    zone: "active"
+    motivation_tags: ["4_经济转型"]
+    primary_market: "CN"
+    notes: "中国独有优势"
+
+  - name: "储能细分"
+    sub_industries: ["构网型", "液流", "PCS", "钠电", "温控", "BMS"]
+    zone: "active"
+    motivation_tags: ["4_经济转型"]
+    primary_market: "CN+US"
+    notes: "避开锂电主流产能过剩，只关注细分缺口"
+
+  # ─── D 类：韩国特色 2 ───
+  - name: "造船海工"
+    sub_industries: ["LNG船", "海工平台", "军舰"]
+    zone: "active"
+    motivation_tags: ["地缘受益"]
+    primary_market: "KR"
+    notes: "韩国全球领先"
+
+  - name: "韩国电池"
+    sub_industries: ["LG", "Samsung SDI", "SK On"]
+    zone: "active"
+    motivation_tags: ["市场驱动"]
+    primary_market: "KR+US"
+    notes: "北美IRA受益"
+
+  # ─── E 类：结构性主题 3 ───
+  - name: "军工"
+    sub_industries: ["航空航天", "船舶", "军贸"]
+    zone: "active"
+    motivation_tags: ["1_国家安全"]
+    primary_market: "CN+KR+US"
+    notes: "地缘冲突+国防预算"
+
+  - name: "创新药"
+    sub_industries: ["创新biotech", "CXO", "药械组合"]
+    zone: "active"
+    motivation_tags: ["4_经济转型"]
+    primary_market: "CN+US"
+    notes: "老龄化+医保改革"
+
+  - name: "人形机器人"
+    sub_industries: ["整机", "减速器", "关节模组"]
+    zone: "observation"
+    motivation_tags: ["新兴"]
+    primary_market: "CN+US"
+    notes: "早期观察，技术路线明朗后转active"
+
+
+# ══════════════════════ 持仓（暂无）══════════════════════
+
+holdings: []
+
+
+# ══════════════════════ 投资原则（5 条结构化对象）══════════════════════
+
+principles:
+  - id: "P1"
+    title: "异常可见性优先于执行速度"
+    core: "知道出问题比解决问题更重要"
+    application:
+      - "买入前记录完整decision reasoning"
+      - "每月回看持仓：假设是否仍成立"
+      - "如果某假设不知道是否成立，先假定已改变"
+      - "数据时效必须披露"
+    warnings:
+      - "持仓涨了但说不清为什么 = 危险信号"
+      - "不记得何时做的判断 = 假设可能已失效"
+    source: "Scout最高设计原则"
+
+  - id: "P2"
+    title: "结构>智能，纪律>灵活"
+    core: "规则能做的不依赖LLM/直觉，稳定流程胜于聪明决定"
+    application:
+      - "买入前必做pre-mortem（3个失败场景）"
+      - "持仓半年再平衡一次，不因短期波动调整"
+      - "硬底线：动机失效/竞争格局变化/管理层换人 = 卖"
+      - "3天涨>10%不买，让市场冷静"
+    warnings:
+      - "'这次不一样' = 纪律在被突破"
+      - "'再等等看' = 纪律被情绪替代"
+    source: "Scout两阶段决策+混合制架构"
+
+  - id: "P3"
+    title: "聚焦独特价值，拒绝广度"
+    core: "在你真正懂的领域深耕，不为多元化而多元化"
+    application:
+      - "关注列表15个行业上限"
+      - "每个行业建立深度理解（政策+动机+缺口+链条）"
+      - "对不懂的领域say no（如DeFi/NFT/加密货币）"
+      - "大师模块12视角 = 承认自己不是全知"
+    warnings:
+      - "'别人都买XX我也该买' = 广度陷阱"
+      - "'趋势来了赶紧上' = 不懂也投"
+    source: "Scout独特10%+深度不广度原则"
+
+  - id: "P4"
+    title: "工具+记忆互补，不替代判断"
+    core: "数据不等于洞察，记忆不等于决策"
+    application:
+      - "看Scout推荐后问：Scout没看到什么"
+      - "跨市场对比：Scout自动但你要再思考"
+      - "Claude Desktop深度分析后，决策还是你做"
+      - "盈亏归因：责任100%在你"
+    warnings:
+      - "'Scout说A级我就买' = 工具替代判断"
+      - "'我直觉好不需要工具' = 工具被拒斥"
+    source: "Scout责任边界+Scout+LLM协作架构"
+
+  - id: "P5"
+    title: "时间是朋友不是敌人"
+    core: "3-5年持有期让你容错，短期噪音不重要"
+    application:
+      - "买入后3年内不看账户总市值"
+      - "持仓分3-5次建仓，间隔至少1个月"
+      - "市场恐慌时检查硬底线，不触发就持有"
+      - "黑天鹅期考虑加仓而非恐慌卖"
+    warnings:
+      - "每天看账户 = 短期化陷阱"
+      - "赶紧锁定利润 = 不相信时间"
+    source: "3-5年持有定位+长期纪律系统"
+
+
+# ══════════════════════ 投资者上下文（Phase 1 新增）══════════════════════
+
+user_context:
+  investor_type: "长期价值投资者"
+  capital_range: "₩1-3亿"
+  holding_horizon: "3-5年"
+  markets: ["A", "KR", "US"]
+  tech_background: "非程序员，能做架构设计"
+  tools_stack: ["Scout", "Claude订阅", "未来可能Koyfin"]
+  api_key_status: "Phase 1不用Anthropic API"
+  phase: "cold_start"
+
+
+# ══════════════════════ 生成元数据（不落库）══════════════════════
+
+meta:
+  generated_at: "2026-04-18"
+  scout_version: "Phase 1 v1.69"
+  total_industries: 15
+  active_industries: 14
+  observation_industries: 1
+  principles_count: 5

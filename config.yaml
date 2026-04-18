@@ -1,0 +1,73 @@
+# Scout Phase 1 config.yaml
+# 对应系统蓝图 v1.66。时间字段存储永远 UTC；显示用 KST。
+
+# ═══ LLM ═══
+llm:
+  local_model: gemma4:e4b                # Ollama 官方 tag 格式；Gemma 3 (4B effective/e4b)；本地零成本
+  cloud_model: claude-sonnet-4-6         # 当前 Anthropic Sonnet 最新；Phase 1 占位，有 API key 后生效
+
+  phase1_mode: gemma_only                # gemma_only / hybrid / cloud_only
+  api_key_required: false                # Phase 1 不强制 API key；cloud_model 占位
+
+  # v1.66 USD 预算（稳态期准则；Phase 1 不生效但预写）
+  daily_llm_cost_usd_running: 1          # v1.65 稳态日预算
+  monthly_llm_cost_usd: 50               # 冷启动期月上限
+  emergency_stop_single_call_usd: 10     # 单次调用硬熔断
+  emergency_stop_daily_usd: 20           # 单日累计硬熔断
+
+  # 原 doc KRW 字段（保留兼容）
+  daily_cost_limit_krw: 4500
+  monthly_cost_limit_krw: 60000
+
+# ═══ 信源（Phase 1 5 个核心）═══
+sources:
+  D1:
+    name: 国务院
+    url: https://www.gov.cn/
+    frequency_hours: 6
+    credibility: 权威
+  D4:
+    name: Semantic Scholar
+    api_url: https://api.semanticscholar.org/
+    frequency_hours: 24
+    credibility: 参考
+  V1:
+    name: 国家统计局
+    frequency_hours: 24
+    credibility: 权威
+  V3:
+    name: 韩国关税厅
+    frequency_hours: 24
+    credibility: 权威
+  S4:
+    name: AkShare
+    frequency_hours: 12
+    credibility: 权威
+
+# ═══ 数据库 ═══
+database:
+  knowledge_db: data/knowledge.db
+  queue_db: data/queue.db
+
+# ═══ 并发 ═══
+concurrency:
+  max_workers: 4
+  db_lock_timeout: 30                    # seconds
+  transaction_isolation: IMMEDIATE       # IMMEDIATE / DEFERRED / EXCLUSIVE
+
+# ═══ 错误处理 ═══
+error_handling:
+  max_retries: 3
+  retry_backoff_base: 2                  # 指数退避：2^i 秒
+  alert_webhook: null                    # 告警通道 URL，可选
+
+# ═══ 时区 ═══
+timezone: Asia/Seoul                      # 显示时区；存储永远 UTC
+
+# ═══ 测试 ═══
+testing:
+  coverage_target: 60
+  fixture_dir: tests/fixtures
+
+# ═══ 运行模式 ═══
+mode: cold_start                          # cold_start / running / diagnosis
