@@ -424,6 +424,36 @@ class TestD1PolicyFunding:
         assert d.evidence["supportive_count"] == 1
         assert d.evidence["skipped_restrictive_count"] == 1
 
+    # v1.10 neutral 处理（Gemma backfill 主路径）
+    def test_neutral_only_default_25(self, tmp_db, agent):
+        """v1.10: direction='neutral' 不进 funded/supportive 升级，仅 default 25。"""
+        _seed_industry(tmp_db)
+        _seed_info_unit(
+            tmp_db, uid="nt1", direction="neutral",
+            content="关于 AI 算力领域统计口径调整的通知",
+        )
+        d = agent._d1_policy_funding("AI算力")
+        assert d.score == 25
+        assert d.evidence["level"] == "default_directive"
+        assert d.evidence["neutral_count"] == 1
+
+    def test_neutral_does_not_block_supportive(self, tmp_db, agent):
+        """v1.10: neutral + supportive 同存 → 取 supportive 档（neutral 不阻塞升档）。"""
+        _seed_industry(tmp_db)
+        _seed_info_unit(
+            tmp_db, uid="nt2a", direction="neutral",
+            content="关于 AI 算力统计口径的通知",
+        )
+        _seed_info_unit(
+            tmp_db, uid="nt2b", direction="supportive",
+            content="鼓励 AI 算力基础设施建设",
+        )
+        d = agent._d1_policy_funding("AI算力")
+        assert d.score == 50
+        assert d.evidence["level"] == "supportive"
+        assert d.evidence["neutral_count"] == 1
+        assert d.evidence["supportive_count"] == 1
+
 
 class TestD2Motivation:
     def test_stable_drift_high_score(self, tmp_db, agent):

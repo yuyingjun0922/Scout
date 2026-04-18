@@ -352,6 +352,33 @@ class ScoutRunner:
         except Exception as e:
             self._handle_failure("motivation_drift", e)
 
+    async def job_backfill_direction(self) -> None:
+        """v1.10: 用 Gemma 回填 info_units.policy_direction NULL。失败入 agent_errors。"""
+        self.logger.info("[backfill:direction] starting")
+        try:
+            from agents.direction_backfill_agent import DirectionBackfillAgent
+            agent = DirectionBackfillAgent(
+                self.kdb,
+                ollama_host=self.ollama_host,
+                model=self.ollama_model,
+            )
+            result = await self._run_in_thread(agent.run, 50)
+            if result is None:
+                self.logger.warning("[backfill:direction] agent returned None")
+                self._handle_failure(
+                    "backfill_direction", RuntimeError("returned None")
+                )
+                return
+            self.logger.info(
+                f"[backfill:direction] scanned={result['scanned']} "
+                f"succeeded={result['succeeded']} failed={result['failed']} "
+                f"skipped_invalid={result['skipped_invalid']} "
+                f"per_direction={result['per_direction']}"
+            )
+            self._clear_failure("backfill_direction")
+        except Exception as e:
+            self._handle_failure("backfill_direction", e)
+
     async def job_financial_refresh(self) -> None:
         """周任务：刷新 A 股 stock_financials（Z'' + PEG）。失败计入 agent_errors。"""
         self.logger.info("[financial:refresh] starting")
@@ -633,6 +660,15 @@ class ScoutRunner:
             self.job_motivation_drift,
             CronTrigger(hour=5, minute=0, timezone=KST),
             id="motivation_drift",
+            replace_existing=True, max_instances=1,
+            misfire_grace_time=3600,
+        )
+
+        # v1.10：政策方向回填（每日 04:00 KST，先于 motivation_drift / recommend_batch）
+        self.scheduler.add_job(
+            self.job_backfill_direction,
+            CronTrigger(hour=4, minute=0, timezone=KST),
+            id="backfill_direction",
             replace_existing=True, max_instances=1,
             misfire_grace_time=3600,
         )
@@ -1168,6 +1204,54 @@ def cmd_motivation_drift(
         kdb.close()
 
 
+def cmd_backfill_direction(
+    *,
+    limit: int,
+    ollama_host: str,
+    ollama_model: str,
+    kdb_path: Path,
+    logger: logging.Logger,
+) -> int:
+    """v1.10 用 Gemma 回填 info_units.policy_direction 的 NULL 值。"""
+    import json as _json
+
+    from agents.direction_backfill_agent import DirectionBackfillAgent
+    from infra.db_manager import DatabaseManager
+
+    if sys.stdout.encoding and sys.stdout.encoding.lower() != "utf-8":
+        try:
+            sys.stdout.reconfigure(encoding="utf-8")
+        except Exception:
+            pass
+
+    kdb = DatabaseManager(kdb_path)
+    try:
+        agent = DirectionBackfillAgent(
+            kdb,
+            ollama_host=ollama_host,
+            model=ollama_model,
+        )
+        result = agent.run(limit=limit)
+        if result is None:
+            logger.error("[cli:backfill-direction] agent.run() returned None")
+            return 1
+        print(_json.dumps(result, ensure_ascii=False, indent=2))
+        logger.info(
+            f"[cli:backfill-direction] scanned={result['scanned']} "
+            f"succeeded={result['succeeded']} failed={result['failed']} "
+            f"skipped_invalid={result['skipped_invalid']} "
+            f"per_direction={result['per_direction']}"
+        )
+        return 0
+    except Exception as e:
+        logger.error(
+            f"[cli:backfill-direction] failed: {type(e).__name__}: {e}"
+        )
+        return 1
+    finally:
+        kdb.close()
+
+
 def cmd_report(
     report_type: str,
     *,
@@ -1329,6 +1413,15 @@ def build_arg_parser() -> argparse.ArgumentParser:
         help="单行业模式下立即重新检测（默认只读快照）",
     )
 
+    backfill_p = sub.add_parser(
+        "backfill-direction",
+        help="v1.10 用 Gemma 回填 info_units.policy_direction NULL 值",
+    )
+    backfill_p.add_argument(
+        "--limit", type=int, default=20,
+        help="本次最多处理多少条（默认 20）",
+    )
+
     return parser
 
 
@@ -1441,6 +1534,15 @@ def main(argv: Optional[List[str]] = None) -> int:
         return cmd_motivation_drift(
             industry=args.industry,
             refresh=args.refresh,
+            kdb_path=paths["kdb_path"],
+            logger=logger,
+        )
+
+    if args.command == "backfill-direction":
+        return cmd_backfill_direction(
+            limit=args.limit,
+            ollama_host=ollama_host,
+            ollama_model=ollama_model,
             kdb_path=paths["kdb_path"],
             logger=logger,
         )

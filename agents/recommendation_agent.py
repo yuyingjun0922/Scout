@@ -475,17 +475,20 @@ class RecommendationAgent(BaseAgent):
     # ─────────────── 阶段 2：6 维度 ───────────────
 
     def _d1_policy_funding(self, industry: Optional[str]) -> DimensionScore:
-        """d1 政策含金量（v1.09 增强：NULL direction 走轻量关键词推断）。
+        """d1 政策含金量（v1.10：Gemma backfill 主路径 + 关键词兜底）。
+
+        优先级：
+          direction='supportive'   → 走 funded/mandatory/supportive 三档
+          direction='restrictive'  → SKIP（政策反对的不计入）
+          direction='neutral'      → 独立计数，不参与 funded 升级（仅默认 25）
+          direction IS NULL        → 关键词推断兜底（DirectionBackfillAgent 还没处理的）
 
         分级（取最高一档）：
           funded(100)              — content 含"财政/专项/补贴/基金/投入/资金/万亿/亿元/预算..."
           mandatory(75)            — content 含"必须/强制/应当/不得/责令/规定/要求"
-          supportive(50)           — direction='supportive' OR NULL+content含"支持/推动/培育/打造/促进/加快/鼓励/加大/强化"
+          supportive(50)           — direction='supportive' OR NULL+content含 support_kw
           presumed_supportive(30)  — direction=NULL，content 既无 support 也无 restrict 关键词
-          default_directive(25)    — 0 候选记录或仅有 restrictive
-
-        SKIP 规则：direction='restrictive'，或 direction=NULL 且 content 仅含 restrictive_kw
-        （政策反对的不计入）。
+          default_directive(25)    — 0 候选 / 仅 restrictive / 仅 neutral
         """
         w = WEIGHTS["d1"]
         if not industry:
@@ -514,7 +517,7 @@ class RecommendationAgent(BaseAgent):
         support_kw = ["支持", "推动", "培育", "打造", "促进", "加快", "鼓励", "加大", "强化"]
         restrict_kw = ["严控", "退出", "清退", "整治", "限制", "禁止", "取缔", "停止", "淘汰"]
 
-        funded = mandatory = supportive = presumed = skipped = 0
+        funded = mandatory = supportive = presumed = neutral = skipped = 0
         for r in rows:
             content = r["content"] or ""
             direction = (r["policy_direction"] or "").lower()
@@ -533,7 +536,12 @@ class RecommendationAgent(BaseAgent):
                     supportive += 1
                 continue
 
-            # direction is None / unknown → 关键词推断
+            # v1.10: Gemma 已判定 neutral → 独立计数，不参与 funded/mandatory/supportive
+            if direction == "neutral":
+                neutral += 1
+                continue
+
+            # direction is None / unknown → 关键词推断兜底
             has_support = any(k in content for k in support_kw)
             has_restrict = any(k in content for k in restrict_kw)
             if has_support:
@@ -570,6 +578,7 @@ class RecommendationAgent(BaseAgent):
             "funded_count": funded,
             "mandatory_count": mandatory,
             "presumed_count": presumed,
+            "neutral_count": neutral,
             "skipped_restrictive_count": skipped,
             "lookback_days": POLICY_LOOKBACK_DAYS,
             "level": level,
