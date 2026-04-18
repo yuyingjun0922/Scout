@@ -191,6 +191,7 @@ class ScoutRunner:
         self.alerted_agents: set = set()
         self.signal_agent: Optional[Any] = None
         self.direction_agent: Optional[Any] = None
+        self.push_consumer: Optional[Any] = None  # v1.12 lazy
 
     # ── Collector factory ──
 
@@ -318,7 +319,11 @@ class ScoutRunner:
             self._handle_failure("daily_briefing", e)
 
     async def job_recommend_batch(self) -> None:
-        """v1.07：周一/周四 09:00 KST 全量跑 A 股推荐 Agent。"""
+        """v1.07：周一/周四 09:00 KST 全量跑 A 股推荐 Agent。
+
+        v1.12：A 级推到 push_outbox(red)、B 级推 push_outbox(blue)；
+               bias_warnings_count ≥ 3 追加黄色 alert。
+        """
         self.logger.info("[recommend:batch] starting")
         try:
             from agents.recommendation_agent import RecommendationAgent
@@ -334,12 +339,71 @@ class ScoutRunner:
                 f"[recommend:batch] processed={result['processed']} "
                 f"levels={result['levels']}"
             )
+            await self._run_in_thread(
+                self._push_from_recommendation_results, result.get("results") or []
+            )
             self._clear_failure("recommend_batch")
         except Exception as e:
             self._handle_failure("recommend_batch", e)
 
+    def _push_from_recommendation_results(
+        self, results: List[Dict[str, Any]]
+    ) -> None:
+        """v1.12：遍历 rec results，对 A/B 级推荐 push，对 ≥3 bias 警告黄色告警。"""
+        consumer = self._build_push_consumer()
+        if consumer is None:
+            return
+        pushed_rec = 0
+        pushed_bias = 0
+        for r in results:
+            if not isinstance(r, dict):
+                continue
+            if not r.get("ok"):
+                continue
+            try:
+                ev = consumer.produce_from_recommendation(r)
+                if ev:
+                    pushed_rec += 1
+            except Exception as e:
+                self.logger.warning(
+                    f"[recommend:push] rec push failed for "
+                    f"{r.get('stock','?')}: {type(e).__name__}: {e}"
+                )
+            # bias alert（count 由 rec verification 提供）
+            verif = r.get("verification") or {}
+            bc = verif.get("bias_warnings_count")
+            if isinstance(bc, int) and bc >= 3:
+                try:
+                    faux = {
+                        "stock": r.get("stock"),
+                        "industry": r.get("industry"),
+                        "bias_warnings": {
+                            "stage": "decision",
+                            "warnings": [
+                                {"type": "aggregate", "note": f"≥{bc} 条偏误警告"}
+                            ] * bc,
+                            "downgrade": bc >= 3,
+                        },
+                    }
+                    ev = consumer.produce_from_bias_warnings(faux)
+                    if ev:
+                        pushed_bias += 1
+                except Exception as e:
+                    self.logger.warning(
+                        f"[recommend:push] bias push failed for "
+                        f"{r.get('stock','?')}: {type(e).__name__}: {e}"
+                    )
+        if pushed_rec or pushed_bias:
+            self.logger.info(
+                f"[recommend:push] rec_pushed={pushed_rec} "
+                f"bias_pushed={pushed_bias}"
+            )
+
     async def job_motivation_drift(self) -> None:
-        """v1.08：每日 05:00 KST 跑 MotivationDriftAgent，更新 watchlist.motivation_drift。"""
+        """v1.08：每日 05:00 KST 跑 MotivationDriftAgent，更新 watchlist.motivation_drift。
+
+        v1.12：reversing → push(red)，drifting → push(blue)。
+        """
         self.logger.info("[motivation:drift] starting")
         try:
             from agents.motivation_drift_agent import MotivationDriftAgent
@@ -356,9 +420,33 @@ class ScoutRunner:
                 f"stable={result['stable']} drifting={result['drifting']} "
                 f"reversing={result['reversing']}"
             )
+            await self._run_in_thread(
+                self._push_from_drift_results, result.get("results") or []
+            )
             self._clear_failure("motivation_drift")
         except Exception as e:
             self._handle_failure("motivation_drift", e)
+
+    def _push_from_drift_results(self, results: List[Dict[str, Any]]) -> None:
+        """v1.12：遍历 drift detection results，对 reversing/drifting 推送。"""
+        consumer = self._build_push_consumer()
+        if consumer is None:
+            return
+        pushed = 0
+        for r in results:
+            if not isinstance(r, dict):
+                continue
+            try:
+                ev = consumer.produce_from_drift(r)
+                if ev:
+                    pushed += 1
+            except Exception as e:
+                self.logger.warning(
+                    f"[drift:push] failed for {r.get('industry','?')}: "
+                    f"{type(e).__name__}: {e}"
+                )
+        if pushed:
+            self.logger.info(f"[drift:push] drift_pushed={pushed}")
 
     async def job_backfill_direction(self) -> None:
         """v1.10: 用 Gemma 回填 info_units.policy_direction NULL。失败入 agent_errors。"""
@@ -388,7 +476,10 @@ class ScoutRunner:
             self._handle_failure("backfill_direction", e)
 
     async def job_financial_refresh(self) -> None:
-        """周任务：刷新 A 股 stock_financials（Z'' + PEG）。失败计入 agent_errors。"""
+        """周任务：刷新 A 股 stock_financials（Z'' + PEG）。失败计入 agent_errors。
+
+        v1.12：批完后扫 stock_financials，Z''<1.81 推送红色告警。
+        """
         self.logger.info("[financial:refresh] starting")
         try:
             from agents.financial_agent import FinancialAgent
@@ -402,9 +493,88 @@ class ScoutRunner:
                 f"[financial:refresh] done: processed={result['processed']} "
                 f"succeeded={result['succeeded']} failed={result['failed']}"
             )
+            await self._run_in_thread(self._push_financial_distress)
             self._clear_failure("financial_refresh")
         except Exception as e:
             self._handle_failure("financial_refresh", e)
+
+    def _push_financial_distress(self) -> None:
+        """v1.12：扫 stock_financials，Z''<1.81 → push_alert(red)。entity_key 带 KST 日期幂等。"""
+        consumer = self._build_push_consumer()
+        if consumer is None:
+            return
+        try:
+            rows = self.kdb.query(
+                """SELECT stock, z_score, report_period
+                   FROM stock_financials
+                   WHERE z_score IS NOT NULL AND z_score < 1.81
+                   ORDER BY z_score ASC"""
+            )
+        except Exception as e:
+            self.logger.warning(
+                f"[financial:push] scan distressed failed: "
+                f"{type(e).__name__}: {e}"
+            )
+            return
+        pushed = 0
+        for r in rows:
+            snap = {
+                "stock": r["stock"],
+                "z_score": r["z_score"],
+                "report_period": r["report_period"],
+            }
+            try:
+                ev = consumer.produce_from_financial_distress(snap)
+                if ev:
+                    pushed += 1
+            except Exception as e:
+                self.logger.warning(
+                    f"[financial:push] {r['stock']}: {type(e).__name__}: {e}"
+                )
+        if pushed:
+            self.logger.info(
+                f"[financial:push] distressed_pushed={pushed} "
+                f"(scanned {len(rows)})"
+            )
+
+    async def job_push_consumer_scan(self) -> None:
+        """v1.12：hourly 扫描 push_outbox — 清理 >14d、频率压制（同类型 1h 内 >3 条）。"""
+        self.logger.info("[push_consumer:scan] starting")
+        consumer = self._build_push_consumer()
+        if consumer is None:
+            self.logger.info("[push_consumer:scan] skipped (no push_queue)")
+            return
+        try:
+            result = await self._run_in_thread(consumer.run)
+            self.logger.info(
+                f"[push_consumer:scan] expired={result['expired']} "
+                f"rate_limited={result['rate_limited']} "
+                f"pending_after={result['pending_after']}"
+            )
+            self._clear_failure("push_consumer_scan")
+        except Exception as e:
+            self._handle_failure("push_consumer_scan", e)
+
+    async def job_push_daily_digest(self) -> None:
+        """v1.12：09:30 KST 把 blue/white pending 汇总成一条 daily_briefing 推送。"""
+        self.logger.info("[push_consumer:digest] starting")
+        consumer = self._build_push_consumer()
+        if consumer is None:
+            self.logger.info("[push_consumer:digest] skipped (no push_queue)")
+            return
+        try:
+            event_id = await self._run_in_thread(consumer.build_daily_digest)
+            if event_id:
+                self.logger.info(
+                    f"[push_consumer:digest] pushed event_id={event_id[:8]}..."
+                )
+            else:
+                self.logger.info(
+                    "[push_consumer:digest] no normal-priority pending; skipped"
+                )
+            self._clear_failure("push_consumer_digest")
+        except Exception as e:
+            self._handle_failure("push_consumer_digest", e)
 
     async def job_heartbeat(self) -> None:
         try:
@@ -544,6 +714,17 @@ class ScoutRunner:
             )
         return self.direction_agent
 
+    def _build_push_consumer(self) -> Optional[Any]:
+        """v1.12：lazy-build PushConsumerAgent。push_queue 缺失返 None。"""
+        if self.push_queue is None:
+            return None
+        if self.push_consumer is None:
+            from agents.push_consumer_agent import PushConsumerAgent
+            self.push_consumer = PushConsumerAgent(
+                kdb=self.kdb, push_queue=self.push_queue
+            )
+        return self.push_consumer
+
     # ── 失败计数与告警 ──
 
     def _handle_failure(self, agent_id: str, exc: Exception) -> None:
@@ -677,6 +858,25 @@ class ScoutRunner:
             self.job_backfill_direction,
             CronTrigger(hour=4, minute=0, timezone=KST),
             id="backfill_direction",
+            replace_existing=True, max_instances=1,
+            misfire_grace_time=3600,
+        )
+
+        # v1.12：推送消费 Agent
+        #   hourly 扫描 push_outbox：过期清理 + 同类型 1h 频率压制
+        self.scheduler.add_job(
+            self.job_push_consumer_scan,
+            IntervalTrigger(hours=1),
+            id="push_consumer_scan",
+            next_run_time=now_utc + timedelta(seconds=stagger[4]),
+            replace_existing=True, max_instances=1, coalesce=True,
+            misfire_grace_time=3600,
+        )
+        #   09:30 KST daily digest（blue/white → 一条 daily_briefing）
+        self.scheduler.add_job(
+            self.job_push_daily_digest,
+            CronTrigger(hour=9, minute=30, timezone=KST),
+            id="push_consumer_digest",
             replace_existing=True, max_instances=1,
             misfire_grace_time=3600,
         )

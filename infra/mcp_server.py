@@ -113,10 +113,12 @@ class ScoutToolImpl:
         db: DatabaseManager,
         reports_dir: Path,
         access_logger: Optional[logging.Logger] = None,
+        push_queue: Optional[Any] = None,
     ):
         self.db = db
         self.reports_dir = Path(reports_dir)
         self.access_logger = access_logger
+        self.push_queue = push_queue  # v1.12 MCP 推送工具用
 
     # ── 访问日志 ──
 
@@ -706,6 +708,76 @@ class ScoutToolImpl:
             _impl,
         )
 
+    # ════════════ (n) get_pending_messages (v1.12) ════════════
+
+    def get_pending_messages(
+        self, priority: str = "all", max: int = 50
+    ) -> Dict[str, Any]:
+        """v1.12 推送 Agent MCP 接口：按 priority 过滤 push_outbox pending 消息。
+
+        参数：
+            priority: 'all' | 'urgent' (red/yellow) | 'normal' (blue/white)
+            max: 最多返回条数（1-200，默认 50）
+        """
+        def _impl() -> Dict[str, Any]:
+            if self.push_queue is None:
+                return {
+                    "ok": False,
+                    "error": "push_queue not configured (MCP 未注入 queue.db)",
+                }
+            valid = ("all", "urgent", "normal")
+            if priority not in valid:
+                return {
+                    "ok": False,
+                    "error": f"priority must be one of {valid}, got {priority!r}",
+                }
+            if not isinstance(max, int) or max < 1 or max > 200:
+                return {
+                    "ok": False,
+                    "error": "max must be int in [1, 200]",
+                }
+            from agents.push_consumer_agent import PushConsumerAgent
+            agent = PushConsumerAgent(kdb=self.db, push_queue=self.push_queue)
+            items = agent.scan_by_priority(kind=priority, max=max)
+            return {
+                "ok": True,
+                "priority": priority,
+                "count": len(items),
+                "messages": items,
+            }
+        return self._call(
+            "get_pending_messages",
+            {"priority": priority, "max": max},
+            _impl,
+        )
+
+    # ════════════ (o) mark_read (v1.12) ════════════
+
+    def mark_read(self, event_id: str) -> Dict[str, Any]:
+        """v1.12 标记某条 push_outbox 消息为已读（status=done）。
+
+        参数：event_id (必选, str)。找不到返 ok=False。
+        """
+        def _impl() -> Dict[str, Any]:
+            if self.push_queue is None:
+                return {
+                    "ok": False,
+                    "error": "push_queue not configured (MCP 未注入 queue.db)",
+                }
+            if not isinstance(event_id, str) or not event_id.strip():
+                return {"ok": False, "error": "event_id must be non-empty str"}
+            eid = event_id.strip()
+            ok = self.push_queue.mark_delivered(eid)
+            if not ok:
+                return {
+                    "ok": False,
+                    "error": f"event_id {eid!r} not found or not pending",
+                }
+            return {"ok": True, "event_id": eid, "status": "done"}
+        return self._call(
+            "mark_read", {"event_id": event_id}, _impl
+        )
+
     # ════════════ (i) get_decision_context ════════════
 
     def get_decision_context(self, stock: str) -> Dict[str, Any]:
@@ -1023,6 +1095,26 @@ def build_server(impl: "ScoutToolImpl") -> Any:
     def get_motivation_status(industry: str, refresh: bool = False) -> dict:
         return impl.get_motivation_status(industry=industry, refresh=refresh)
 
+    @app.tool(description=(
+        "v1.12 推送 Agent：按优先级过滤 push_outbox pending 消息（未读收件箱）。"
+        "参数：priority (可选, 'all'|'urgent'|'normal', 默认 'all')；"
+        "max (可选, int, 1-200, 默认 50)。"
+        "'urgent' = red/yellow（立即关注），'normal' = blue/white（日常汇总）。"
+        "返回 {ok, priority, count, messages[{event_id, priority, message_type, "
+        "alert_type, content, created_at, ...}]}。"
+        "MCP 未注入 push_queue → ok=False。"
+    ))
+    def get_pending_messages(priority: str = "all", max: int = 50) -> dict:
+        return impl.get_pending_messages(priority=priority, max=max)
+
+    @app.tool(description=(
+        "v1.12 推送 Agent：标记某条 push_outbox 消息为已读（status=done）。"
+        "参数：event_id (必选, str)。事件不存在或已 done → ok=False。"
+        "返回 {ok, event_id, status}。"
+    ))
+    def mark_read(event_id: str) -> dict:
+        return impl.mark_read(event_id=event_id)
+
     return app
 
 
@@ -1062,6 +1154,11 @@ def main(argv: Optional[List[str]] = None) -> int:
         help="info_units DB 路径（默认读 SCOUT_DB_PATH env 或 config.yaml）",
     )
     parser.add_argument(
+        "--queue-db",
+        default=None,
+        help="v1.12：queue.db 路径（启用 get_pending_messages/mark_read 工具）",
+    )
+    parser.add_argument(
         "--reports-dir",
         default=str(DEFAULT_REPORTS_DIR),
         help="周报目录（默认 <root>/reports）",
@@ -1077,24 +1174,54 @@ def main(argv: Optional[List[str]] = None) -> int:
     reports_dir = Path(args.reports_dir)
     logs_dir = Path(args.logs_dir)
 
+    # v1.12：queue.db 路径解析（可选；未传则尝试默认路径）
+    qdb_path: Optional[str] = args.queue_db
+    if qdb_path is None:
+        default_qdb = PROJECT_ROOT / "data" / "queue.db"
+        if default_qdb.exists():
+            qdb_path = str(default_qdb)
+
     # 启动前先打到 stderr（stdout 归 MCP 用）
     print(
-        f"[scout-mcp] db={db_path} reports={reports_dir} logs={logs_dir}",
+        f"[scout-mcp] db={db_path} qdb={qdb_path} reports={reports_dir} "
+        f"logs={logs_dir}",
         file=sys.stderr,
         flush=True,
     )
 
     db = DatabaseManager(db_path)
     access_logger = build_access_logger(logs_dir)
+    push_queue: Optional[Any] = None
+    qm: Optional[Any] = None
     try:
+        if qdb_path:
+            try:
+                from infra.push_queue import PushQueue
+                from infra.queue_manager import QueueManager
+                qm = QueueManager(Path(qdb_path))
+                push_queue = PushQueue(qm)
+            except Exception as e:
+                print(
+                    f"[scout-mcp] WARN push_queue init failed "
+                    f"({type(e).__name__}: {e}) — push tools disabled",
+                    file=sys.stderr, flush=True,
+                )
+                qm = None
+                push_queue = None
         impl = ScoutToolImpl(
-            db=db, reports_dir=reports_dir, access_logger=access_logger
+            db=db, reports_dir=reports_dir, access_logger=access_logger,
+            push_queue=push_queue,
         )
         app = build_server(impl)
         # FastMCP.run 是阻塞的，直到 stdin 关闭
         app.run(transport="stdio")
         return 0
     finally:
+        if qm is not None:
+            try:
+                qm.close()
+            except Exception:
+                pass
         db.close()
 
 
