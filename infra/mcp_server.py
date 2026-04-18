@@ -610,6 +610,42 @@ class ScoutToolImpl:
             "master_analysis", {"stock_code": stock_code}, _impl
         )
 
+    # ════════════ (k) bias_check ════════════
+
+    def bias_check(self, result_json: str, stage: str) -> Dict[str, Any]:
+        """认知偏误检查（v1.04）。result_json 是 JSON 字符串。
+
+        stage: direction/verification/decision/review/all
+        返回 result + bias_warnings 块。永不抛。
+        """
+        def _impl() -> Dict[str, Any]:
+            if not isinstance(result_json, str) or not result_json.strip():
+                return {"ok": False, "error": "result_json must be non-empty JSON str"}
+            try:
+                payload = json.loads(result_json)
+            except json.JSONDecodeError as je:
+                return {"ok": False, "error": f"result_json invalid: {je}"}
+            if not isinstance(payload, dict):
+                return {"ok": False, "error": "result_json must decode to a dict"}
+
+            from agents.bias_checker import (
+                BiasChecker, VALID_STAGES, load_bias_config,
+            )
+            stage_clean = (stage or "all").strip().lower()
+            if stage_clean not in VALID_STAGES:
+                return {
+                    "ok": False,
+                    "error": f"stage must be one of {sorted(VALID_STAGES)}",
+                }
+            checker = BiasChecker(self.db, config=load_bias_config())
+            checked = checker.check(payload, stage_clean)
+            return {"ok": True, "result": checked}
+        return self._call(
+            "bias_check",
+            {"stage": stage, "result_keys": _safe_keys(result_json)},
+            _impl,
+        )
+
     # ════════════ (i) get_decision_context ════════════
 
     def get_decision_context(self, stock: str) -> Dict[str, Any]:
@@ -780,6 +816,17 @@ def _extract_title_seed(content: Any, max_len: int = 10) -> str:
     return ""
 
 
+def _safe_keys(json_str: str) -> List[str]:
+    """从 JSON 字符串里安全提取顶层 keys，仅用于 access log（不抛）。"""
+    if not isinstance(json_str, str):
+        return []
+    try:
+        obj = json.loads(json_str)
+    except (ValueError, TypeError):
+        return []
+    return list(obj.keys()) if isinstance(obj, dict) else []
+
+
 # ══════════════════════ FastMCP 装配 ══════════════════════
 
 
@@ -881,6 +928,17 @@ def build_server(impl: "ScoutToolImpl") -> Any:
     ))
     def master_analysis(stock_code: str) -> dict:
         return impl.master_analysis(stock_code=stock_code)
+
+    @app.tool(description=(
+        "认知偏误检查（v1.04）：对一段决策结果跑 4 类检查 "
+        "（B01 确认偏误/B02 幸存者偏差/B03 基数效应/B04 行业集中度）。"
+        "参数：result_json (必选, JSON 字符串，含 industry/stock/direction 等)；"
+        "stage (必选, 'direction'|'verification'|'decision'|'review'|'all')。"
+        "返回 {ok, result:{...原 result..., bias_warnings:{stage, warnings[], counts, downgrade}}}。"
+        "数据缺失对应 check 返 None（不显示警告 ≠ 没问题）。累计警告 ≥3 → downgrade=True。"
+    ))
+    def bias_check(result_json: str, stage: str) -> dict:
+        return impl.bias_check(result_json=result_json, stage=stage)
 
     return app
 

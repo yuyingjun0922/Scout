@@ -1,0 +1,38 @@
+# Scout 认知偏误检查模块（v1.04 BiasChecker）
+# 每项可独立开关，阈值集中调整。
+
+# B01 确认偏误：方向判断时查近 90 天负面信号
+b01_confirmation_bias: true
+b01_lookback_days: 90
+b01_negative_threshold: 3              # 负面信号 ≥N 条 → 警告
+b01_negative_keywords:                 # 与 policy_direction='restrictive' 取并集
+  - 禁止
+  - 限制
+  - 整改
+  - 罚款
+  - 警告
+  - 暴跌
+  - 亏损
+  - 失败
+  - 争议
+  - 诉讼
+  - 调查
+  - 退市
+  - 取缔
+  - 严禁
+
+# B02 幸存者偏差：复盘时纳入已移除的失败案例
+b02_survivorship_bias: true
+b02_min_removed_for_warning: 1         # 同行业有 ≥N 只已移除/已否决 → 警告
+
+# B03 基数效应：同比增速 >X% 且去年同期下降 >Y%
+b03_base_effect: true
+base_effect_yoy_threshold: 30          # 当年增速 % (>30 触发)
+base_effect_prev_drop: 20              # 去年同期跌幅 % (>20 触发)
+
+# B04 行业集中度：跟踪列表同行业 >N 只
+b04_concentration_risk: true
+concentration_threshold: 5             # track_list 同行业 ≥N 只 → 警告
+
+# 累计警告 ≥N 条 → 标 downgrade=True
+downgrade_threshold: 3
