@@ -11,7 +11,7 @@
     "type": "python",
     "entry_point": "main.py",
     "mcp_config": {
-      "command": "C:\\Users\\13700F\\AppData\\Local\\Programs\\Python\\Python312\\python.exe",
+      "command": "python",
       "args": ["${__dirname}/main.py", "mcp"],
       "env": {
         "PYTHONIOENCODING": "utf-8",
