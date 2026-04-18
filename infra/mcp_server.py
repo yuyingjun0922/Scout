@@ -7,7 +7,7 @@ infra/mcp_server.py — v1.66 Phase 1 Step 10 MCP Server
 传输：stdio（子进程管道，无需网络端口；`scout` 作为 server 名注册）
 SDK：`mcp` (pip install mcp) — FastMCP 装饰器驱动
 
-Phase 1 工具（10 个）：
+Phase 1 工具 (10 个) + v1.03 master_analysis + v1.04 bias_check + v1.07 recommend_stock：
 
     查询类（只读）：
         (a) get_watchlist                 列出 active 行业
@@ -610,6 +610,37 @@ class ScoutToolImpl:
             "master_analysis", {"stock_code": stock_code}, _impl
         )
 
+    # ════════════ (l) recommend_stock (v1.07) ════════════
+
+    def recommend_stock(
+        self, stock_code: str, counter: bool = False
+    ) -> Dict[str, Any]:
+        """v1.07 推荐 Agent：4 阶段混合制评分。
+
+        - counter=False（默认）→ 完整 analyze 结果（dimensions / verification / counter_card / report）
+        - counter=True          → 只返反方卡片
+        缺数据降级为子项默认分；硬底线触发 → level='reject'。永不抛。
+        """
+        def _impl() -> Dict[str, Any]:
+            if not isinstance(stock_code, str) or not stock_code.strip():
+                return {"ok": False, "error": "stock_code must be non-empty str"}
+            code = stock_code.strip()
+            if len(code) != 6 or not code.isdigit():
+                return {
+                    "ok": False,
+                    "error": f"stock_code 必须是 6 位数字 A 股代码，got {code!r}",
+                }
+            from agents.recommendation_agent import RecommendationAgent
+            agent = RecommendationAgent(self.db)
+            if counter:
+                return agent.generate_counter_card(code)
+            return agent.analyze(code)
+        return self._call(
+            "recommend_stock",
+            {"stock_code": stock_code, "counter": counter},
+            _impl,
+        )
+
     # ════════════ (k) bias_check ════════════
 
     def bias_check(self, result_json: str, stage: str) -> Dict[str, Any]:
@@ -939,6 +970,18 @@ def build_server(impl: "ScoutToolImpl") -> Any:
     ))
     def bias_check(result_json: str, stage: str) -> dict:
         return impl.bias_check(result_json=result_json, stage=stage)
+
+    @app.tool(description=(
+        "v1.07 推荐 Agent：单股 4 阶段混合制评分。"
+        "阶段 1 硬底线（policy_fatal/Z<1.81/gap<2/risk_flag）→ 阶段 2 6 维度评分 → "
+        "阶段 3 综合验证（GateAgent +5 / Master ≥3 +5 / Bias ≥3 -10）→ "
+        "阶段 4 级别（A≥75 / B 60-74 / candidate 40-59 / reject<40）。"
+        "参数：stock_code (必选, A 股 6 位代码)；counter (可选, bool, 默认 false)。"
+        "counter=true 只返反方卡片。返回 {ok, stock, level, total_score, dimensions, "
+        "verification, counter_card, report, ...}。缺数据降级 ≠ 错误。"
+    ))
+    def recommend_stock(stock_code: str, counter: bool = False) -> dict:
+        return impl.recommend_stock(stock_code=stock_code, counter=counter)
 
     return app
 

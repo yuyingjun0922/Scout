@@ -615,7 +615,7 @@ class TestScoutRunnerFailureCounter:
 
 class TestScoutRunnerSchedule:
     def test_schedule_all_registers_jobs(self, bootstrapped, tmp_logger):
-        """验证 9 个 job 全部被注册（D1/D4/V1/V3/S4 + 2 周报 + daily + heartbeat）"""
+        """验证 11 个 job 全部被注册（D1/D4/V1/V3/S4 + 2 周报 + daily + financial + recommend + heartbeat）"""
         from apscheduler.schedulers.asyncio import AsyncIOScheduler
         from infra.db_manager import DatabaseManager
         from infra.queue_manager import QueueManager
@@ -634,7 +634,8 @@ class TestScoutRunnerSchedule:
                 "collect_D1", "collect_D4", "collect_V1",
                 "collect_V3", "collect_S4",
                 "weekly_industry_report", "weekly_paper_report",
-                "daily_briefing", "financial_refresh", "heartbeat",
+                "daily_briefing", "financial_refresh",
+                "recommend_batch", "heartbeat",
             }
             assert job_ids == expected
         finally:

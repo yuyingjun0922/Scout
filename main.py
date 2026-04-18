@@ -309,6 +309,27 @@ class ScoutRunner:
         except Exception as e:
             self._handle_failure("daily_briefing", e)
 
+    async def job_recommend_batch(self) -> None:
+        """v1.07：周一/周四 09:00 KST 全量跑 A 股推荐 Agent。"""
+        self.logger.info("[recommend:batch] starting")
+        try:
+            from agents.recommendation_agent import RecommendationAgent
+            agent = RecommendationAgent(self.kdb)
+            result = await self._run_in_thread(agent.run)
+            if result is None:
+                self.logger.warning("[recommend:batch] returned None")
+                self._handle_failure(
+                    "recommend_batch", RuntimeError("returned None")
+                )
+                return
+            self.logger.info(
+                f"[recommend:batch] processed={result['processed']} "
+                f"levels={result['levels']}"
+            )
+            self._clear_failure("recommend_batch")
+        except Exception as e:
+            self._handle_failure("recommend_batch", e)
+
     async def job_financial_refresh(self) -> None:
         """周任务：刷新 A 股 stock_financials（Z'' + PEG）。失败计入 agent_errors。"""
         self.logger.info("[financial:refresh] starting")
@@ -572,6 +593,15 @@ class ScoutRunner:
             self.job_financial_refresh,
             CronTrigger(day_of_week="sat", hour=2, minute=0, timezone=KST),
             id="financial_refresh",
+            replace_existing=True, max_instances=1,
+            misfire_grace_time=3600,
+        )
+
+        # v1.07：推荐 Agent 全量跑（周一/周四 09:00 KST）
+        self.scheduler.add_job(
+            self.job_recommend_batch,
+            CronTrigger(day_of_week="mon,thu", hour=9, minute=0, timezone=KST),
+            id="recommend_batch",
             replace_existing=True, max_instances=1,
             misfire_grace_time=3600,
         )
@@ -931,6 +961,85 @@ def cmd_masters(
         kdb.close()
 
 
+def cmd_recommend(
+    *,
+    symbol: Optional[str],
+    counter: bool,
+    kdb_path: Path,
+    logger: logging.Logger,
+) -> int:
+    """v1.07 推荐 Agent。无 --symbol 跑全量；带 --symbol 单股；--counter 只出反方卡片。"""
+    import json as _json
+
+    from agents.recommendation_agent import RecommendationAgent
+    from infra.db_manager import DatabaseManager
+
+    if sys.stdout.encoding and sys.stdout.encoding.lower() != "utf-8":
+        try:
+            sys.stdout.reconfigure(encoding="utf-8")
+        except Exception:
+            pass
+
+    if symbol is not None and (
+        len(symbol) != 6 or not symbol.isdigit()
+    ):
+        logger.error(f"[cli:recommend] invalid symbol: {symbol!r} (要 6 位数字 A 股)")
+        return 2
+
+    kdb = DatabaseManager(kdb_path)
+    try:
+        agent = RecommendationAgent(kdb)
+        if symbol:
+            if counter:
+                out = agent.generate_counter_card(symbol)
+                print(_json.dumps(out, ensure_ascii=False, indent=2))
+            else:
+                out = agent.analyze(symbol)
+                if "report" in out:
+                    print(out["report"])
+                    print()
+                    print("--- JSON ---")
+                    print(_json.dumps(
+                        {k: v for k, v in out.items() if k != "report"},
+                        ensure_ascii=False, indent=2,
+                    ))
+                else:
+                    print(_json.dumps(out, ensure_ascii=False, indent=2))
+            logger.info(
+                f"[cli:recommend] {symbol} level={out.get('level')} "
+                f"score={out.get('total_score')}"
+            )
+            return 0
+        # 全量
+        result = agent.run()
+        if result is None:
+            logger.error("[cli:recommend] agent.run() returned None")
+            return 1
+        summary = {k: v for k, v in result.items() if k != "results"}
+        print(_json.dumps(summary, ensure_ascii=False, indent=2))
+        print()
+        print("=== Top 10 by total_score ===")
+        sorted_results = sorted(
+            result["results"], key=lambda r: r.get("total_score", 0) or 0,
+            reverse=True,
+        )
+        for r in sorted_results[:10]:
+            print(
+                f"  [{r.get('level','?'):<10}] {r.get('stock')} "
+                f"({r.get('industry') or '?'}) score={r.get('total_score','?')}"
+            )
+        logger.info(
+            f"[cli:recommend] processed={result['processed']} "
+            f"levels={result['levels']}"
+        )
+        return 0
+    except Exception as e:
+        logger.error(f"[cli:recommend] failed: {type(e).__name__}: {e}")
+        return 1
+    finally:
+        kdb.close()
+
+
 def cmd_report(
     report_type: str,
     *,
@@ -1067,6 +1176,18 @@ def build_arg_parser() -> argparse.ArgumentParser:
     masters_p = sub.add_parser("masters", help="对单股运行 5 大师评分（v1.03）")
     masters_p.add_argument("--symbol", required=True, help="A 股 6 位代码")
 
+    recommend_p = sub.add_parser(
+        "recommend", help="v1.07 推荐 Agent（4 阶段混合制）"
+    )
+    recommend_p.add_argument(
+        "--symbol", default=None,
+        help="单股 A 股 6 位代码；不传则跑全量 A 股 universe",
+    )
+    recommend_p.add_argument(
+        "--counter", action="store_true",
+        help="只输出反方卡片（counter card），需配合 --symbol",
+    )
+
     return parser
 
 
@@ -1163,6 +1284,14 @@ def main(argv: Optional[List[str]] = None) -> int:
     if args.command == "masters":
         return cmd_masters(
             symbol=args.symbol,
+            kdb_path=paths["kdb_path"],
+            logger=logger,
+        )
+
+    if args.command == "recommend":
+        return cmd_recommend(
+            symbol=args.symbol,
+            counter=args.counter,
             kdb_path=paths["kdb_path"],
             logger=logger,
         )

@@ -646,9 +646,9 @@ def fastmcp_app(impl):
 
 
 class TestFastMCPRegistration:
-    def test_lists_exactly_12_tools(self, fastmcp_app):
+    def test_lists_exactly_13_tools(self, fastmcp_app):
         tools = asyncio.run(fastmcp_app.list_tools())
-        assert len(tools) == 12
+        assert len(tools) == 13
 
     def test_all_expected_tools_present(self, fastmcp_app):
         tools = asyncio.run(fastmcp_app.list_tools())
@@ -661,6 +661,7 @@ class TestFastMCPRegistration:
             "get_policy_for_motivation_analysis",
             "master_analysis",
             "bias_check",
+            "recommend_stock",
         }
         assert names == expected
 
