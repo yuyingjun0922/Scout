@@ -143,10 +143,109 @@ class GateAgent(BaseAgent):
         d1_score = authority_weight * keyword_multiplier * time_multiplier
         return min(d1_score, 1.2)  # Cap at 1.2
 
+    # ── S4 (财务基本面) Z''-1995 × PEG 评分矩阵（v1.01）──
+    # 行 = Z'' 带；列 = PEG 带。值 ∈ [0, 1]，未命中给 0（DataMissing 不扣分）。
+    _S4_MATRIX = {
+        # (z_band, peg_band) → score
+        ("safe", "cheap"): 1.0, ("safe", "fair"): 0.7, ("safe", "expensive"): 0.3, ("safe", "none"): 0.7,
+        ("grey", "cheap"): 0.5, ("grey", "fair"): 0.3, ("grey", "expensive"): 0.1, ("grey", "none"): 0.3,
+        ("distress", "cheap"): 0.0, ("distress", "fair"): 0.0, ("distress", "expensive"): 0.0, ("distress", "none"): 0.0,
+    }
+
+    @staticmethod
+    def _z_band(z: Optional[float]) -> Optional[str]:
+        if z is None:
+            return None
+        if z >= 2.60:
+            return "safe"
+        if z >= 1.10:
+            return "grey"
+        return "distress"
+
+    @staticmethod
+    def _peg_band(peg: Optional[float]) -> str:
+        if peg is None or peg <= 0:
+            return "none"
+        if peg < 1.0:
+            return "cheap"
+        if peg <= 2.0:
+            return "fair"
+        return "expensive"
+
+    def _score_one_stock(self, stock_code: str) -> Optional[float]:
+        """查 stock_financials 最新一行 → 套矩阵。无行返 None（不扣分）。"""
+        try:
+            row = self.db.query_one(
+                """
+                SELECT z_score, peg_ratio
+                FROM stock_financials
+                WHERE stock = ?
+                ORDER BY report_period DESC
+                LIMIT 1
+                """,
+                (stock_code,),
+            )
+        except sqlite3.Error as e:
+            self.logger.warning(f"stock_financials query error for {stock_code}: {e}")
+            return None
+        if not row:
+            return None
+        z_band = self._z_band(row["z_score"])
+        if z_band is None:
+            return None
+        return self._S4_MATRIX[(z_band, self._peg_band(row["peg_ratio"]))]
+
+    def _stocks_for_industries(self, industries: List[str]) -> List[str]:
+        """对一组行业取 confidence != 'staging' 的 A 股代码。"""
+        if not industries:
+            return []
+        placeholders = ",".join(["?"] * len(industries))
+        try:
+            rows = self.db.query(
+                f"""
+                SELECT DISTINCT stock_code
+                FROM related_stocks
+                WHERE industry IN ({placeholders})
+                  AND market = 'A'
+                  AND confidence != 'staging'
+                  AND status = 'active'
+                  AND stock_code IS NOT NULL
+                """,
+                tuple(industries),
+            )
+            return [r["stock_code"] for r in rows]
+        except sqlite3.Error as e:
+            self.logger.warning(f"_stocks_for_industries DB error: {e}")
+            return []
+
     def calculate_s4_score(self, info_unit: dict) -> float:
-        """计算S4（股票基本面）评分"""
-        # 暂时返回0，因为Phase 1还没有stock_financials关联
-        # Phase 2A会补充：查related_stocks，获取Z-Score和PEG
+        """S4 = 股票基本面评分，0~1。无数据返 0（不扣分）。
+
+        - source='S4'：info_unit 自带 symbol → 直查 stock_financials
+        - source='D1'：通过 related_industries → related_stocks → 平均
+        - 其它源：返 0
+        """
+        source = info_unit.get("source")
+        if source == "S4":
+            symbol = info_unit.get("symbol") or info_unit.get("stock_code")
+            if not symbol:
+                return 0.0
+            score = self._score_one_stock(symbol)
+            return score if score is not None else 0.0
+
+        if source == "D1":
+            industries = info_unit.get("related_industries") or []
+            if not industries:
+                return 0.0
+            stocks = self._stocks_for_industries(industries)
+            scores = [
+                s for s in (self._score_one_stock(c) for c in stocks)
+                if s is not None
+            ]
+            if not scores:
+                return 0.0
+            return round(sum(scores) / len(scores), 4)
+
         return 0.0
 
     def calculate_d4_score(self, info_unit: dict) -> float:
@@ -181,7 +280,7 @@ class GateAgent(BaseAgent):
         )
 
     def get_all_signals(self) -> List[dict]:
-        """从数据库获取所有info_units"""
+        """从数据库获取所有info_units（带 S4 评分需要的关联字段）"""
         try:
             rows = self.db.query("""
                 SELECT
@@ -190,6 +289,8 @@ class GateAgent(BaseAgent):
                     json_extract(content, '$.title') as title,
                     json_extract(content, '$.publisher') as publisher,
                     json_extract(content, '$.keyword_hits') as keyword_hits,
+                    json_extract(content, '$.symbol') as symbol,
+                    related_industries,
                     timestamp
                 FROM info_units
                 WHERE source IN ('D1', 'S4', 'D4')
@@ -198,13 +299,10 @@ class GateAgent(BaseAgent):
 
             signals = []
             for row in rows:
-                keyword_hits = []
-                kh = row['keyword_hits']
-                if kh:
-                    try:
-                        keyword_hits = json.loads(kh) if isinstance(kh, str) else kh
-                    except (json.JSONDecodeError, TypeError) as e:
-                        self.logger.warning(f"keyword_hits parse error (row id={row['id']}): {e}")
+                keyword_hits = self._safe_json_list(row['keyword_hits'], row['id'], 'keyword_hits')
+                related_industries = self._safe_json_list(
+                    row['related_industries'], row['id'], 'related_industries'
+                )
 
                 signals.append({
                     'id': row['id'],
@@ -212,6 +310,8 @@ class GateAgent(BaseAgent):
                     'title': row['title'] or '',
                     'publisher': row['publisher'] or '',
                     'keyword_hits': keyword_hits,
+                    'symbol': row['symbol'] or '',
+                    'related_industries': related_industries,
                     'timestamp': row['timestamp'] or '',
                 })
 
@@ -219,6 +319,17 @@ class GateAgent(BaseAgent):
 
         except sqlite3.Error as e:
             self.logger.error(f"Database error in get_all_signals: {e}")
+            return []
+
+    def _safe_json_list(self, raw, row_id, field_name) -> list:
+        """JSON 数组字段兜底解析；非数组 → 空列表 + 日志。"""
+        if not raw:
+            return []
+        try:
+            parsed = json.loads(raw) if isinstance(raw, str) else raw
+            return parsed if isinstance(parsed, list) else []
+        except (json.JSONDecodeError, TypeError) as e:
+            self.logger.warning(f"{field_name} parse error (row id={row_id}): {e}")
             return []
 
     def rank_signals(self, top_n: int = 10) -> List[SignalScore]:

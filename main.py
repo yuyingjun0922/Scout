@@ -309,6 +309,25 @@ class ScoutRunner:
         except Exception as e:
             self._handle_failure("daily_briefing", e)
 
+    async def job_financial_refresh(self) -> None:
+        """周任务：刷新 A 股 stock_financials（Z'' + PEG）。失败计入 agent_errors。"""
+        self.logger.info("[financial:refresh] starting")
+        try:
+            from agents.financial_agent import FinancialAgent
+            agent = FinancialAgent(self.kdb)
+            result = await self._run_in_thread(agent.run)
+            if result is None:
+                self.logger.warning("[financial:refresh] agent returned None")
+                self._handle_failure("financial_refresh", RuntimeError("returned None"))
+                return
+            self.logger.info(
+                f"[financial:refresh] done: processed={result['processed']} "
+                f"succeeded={result['succeeded']} failed={result['failed']}"
+            )
+            self._clear_failure("financial_refresh")
+        except Exception as e:
+            self._handle_failure("financial_refresh", e)
+
     async def job_heartbeat(self) -> None:
         try:
             stats = await self._run_in_thread(
@@ -546,6 +565,15 @@ class ScoutRunner:
             CronTrigger(hour=7, minute=30, timezone=KST),
             id="daily_briefing",
             replace_existing=True, max_instances=1,
+        )
+
+        # v1.01：A 股财务周刷新（周六 02:00 KST，避开开盘和周报时间）
+        self.scheduler.add_job(
+            self.job_financial_refresh,
+            CronTrigger(day_of_week="sat", hour=2, minute=0, timezone=KST),
+            id="financial_refresh",
+            replace_existing=True, max_instances=1,
+            misfire_grace_time=3600,
         )
 
         # 心跳

@@ -215,11 +215,14 @@ CREATE TABLE IF NOT EXISTS stock_financials (
     roe REAL,
     roa REAL,
     f_score INTEGER,                        -- Piotroski F-Score
-    z_score REAL,                           -- Altman Z-Score
+    z_score REAL,                           -- Altman Z''-1995 (emerging markets)
     m_score REAL,                           -- Beneish M-Score (Phase 3+)
     dupont_data TEXT,                       -- JSON
     historical_peak REAL,
     historical_peak_date TEXT,              -- UTC
+    pe_ttm REAL,                            -- v1.01 Trailing 12-month P/E
+    eps_cagr_3y REAL,                       -- v1.01 3-year EPS CAGR (decimal, 0.20 = 20%)
+    peg_ratio REAL,                         -- v1.01 PE_TTM / (eps_cagr_3y * 100)
     updated_at TEXT                         -- UTC
 );
 CREATE INDEX IF NOT EXISTS idx_sf_stock ON stock_financials(stock);
@@ -403,8 +406,33 @@ EXPECTED_TABLES = [
 ]
 
 
+# v1.01：表迁移登记。{table_name: [(column, ddl_type), ...]}
+# 仅 ALTER TABLE ADD COLUMN（SQLite 不支持 IF NOT EXISTS），靠 PRAGMA table_info 去重。
+_COLUMN_MIGRATIONS = {
+    "stock_financials": [
+        ("pe_ttm", "REAL"),
+        ("eps_cagr_3y", "REAL"),
+        ("peg_ratio", "REAL"),
+    ],
+}
+
+
+def _migrate_columns(conn):
+    """对已存在表补齐缺失的列（幂等）。CREATE TABLE IF NOT EXISTS 不会改老表，只能 ALTER。"""
+    for table, columns in _COLUMN_MIGRATIONS.items():
+        existing = {
+            row[1] for row in conn.execute(f"PRAGMA table_info({table})").fetchall()
+        }
+        if not existing:
+            # 表还不存在，executescript 会建好，跳过
+            continue
+        for col, col_type in columns:
+            if col not in existing:
+                conn.execute(f"ALTER TABLE {table} ADD COLUMN {col} {col_type}")
+
+
 def init_database(db_path=DEFAULT_DB_PATH):
-    """创建knowledge.db及其全部表+索引。幂等：CREATE TABLE IF NOT EXISTS。"""
+    """创建knowledge.db及其全部表+索引。幂等：CREATE TABLE IF NOT EXISTS + 迁移补列。"""
     db_path = Path(db_path)
     db_path.parent.mkdir(parents=True, exist_ok=True)
 
@@ -413,6 +441,7 @@ def init_database(db_path=DEFAULT_DB_PATH):
         conn.execute("PRAGMA foreign_keys = ON")
         conn.execute("PRAGMA journal_mode = WAL")
         conn.executescript(SCHEMA_SQL)
+        _migrate_columns(conn)
         conn.commit()
     finally:
         conn.close()

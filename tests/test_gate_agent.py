@@ -163,6 +163,141 @@ class TestGateAgent:
         assert d['gate_score'] == 0.72
 
 
+class TestS4Score:
+    """v1.01 S4 评分（Z'' × PEG 矩阵）测试"""
+
+    @pytest.fixture
+    def agent_with_db(self, tmp_path):
+        """带空 tmp DB 的 GateAgent，方便逐测试 seed。"""
+        from infra.db_manager import DatabaseManager
+        from knowledge.init_db import init_database
+        db_path = tmp_path / "gate_s4_test.db"
+        init_database(db_path)
+        db = DatabaseManager(db_path)
+        agent = GateAgent(db)
+        yield agent, db
+        db.close()
+
+    def _seed_financials(self, db, stock, z, peg, period="2024-12-31"):
+        db.write(
+            """INSERT INTO stock_financials
+               (stock, report_period, z_score, peg_ratio, updated_at)
+               VALUES (?, ?, ?, ?, ?)""",
+            (stock, period, z, peg, "2026-04-18T00:00:00+00:00"),
+        )
+
+    def _seed_related(self, db, industry, code):
+        db.write(
+            """INSERT INTO related_stocks
+               (industry, stock_code, market, confidence, status)
+               VALUES (?, ?, ?, ?, ?)""",
+            (industry, code, "A", "confirmed", "active"),
+        )
+
+    def test_s4_score_safe_cheap_returns_1(self, agent_with_db):
+        agent, db = agent_with_db
+        self._seed_financials(db, "600519", z=3.5, peg=0.5)
+        score = agent.calculate_s4_score(
+            {"source": "S4", "symbol": "600519"}
+        )
+        assert score == 1.0
+
+    def test_s4_score_safe_expensive_returns_0_3(self, agent_with_db):
+        agent, db = agent_with_db
+        self._seed_financials(db, "600519", z=3.5, peg=2.5)
+        score = agent.calculate_s4_score(
+            {"source": "S4", "symbol": "600519"}
+        )
+        assert score == 0.3
+
+    def test_s4_score_grey_fair_returns_0_3(self, agent_with_db):
+        agent, db = agent_with_db
+        self._seed_financials(db, "600519", z=1.5, peg=1.5)
+        score = agent.calculate_s4_score(
+            {"source": "S4", "symbol": "600519"}
+        )
+        assert score == 0.3
+
+    def test_s4_score_distress_always_zero(self, agent_with_db):
+        agent, db = agent_with_db
+        self._seed_financials(db, "600519", z=0.5, peg=0.5)
+        score = agent.calculate_s4_score(
+            {"source": "S4", "symbol": "600519"}
+        )
+        assert score == 0.0
+
+    def test_s4_score_no_peg_uses_z_only(self, agent_with_db):
+        agent, db = agent_with_db
+        # safe + no peg → 0.7
+        self._seed_financials(db, "600519", z=3.5, peg=None)
+        score = agent.calculate_s4_score(
+            {"source": "S4", "symbol": "600519"}
+        )
+        assert score == 0.7
+
+    def test_s4_score_negative_peg_treated_as_none(self, agent_with_db):
+        agent, db = agent_with_db
+        self._seed_financials(db, "600519", z=3.5, peg=-0.5)
+        score = agent.calculate_s4_score(
+            {"source": "S4", "symbol": "600519"}
+        )
+        assert score == 0.7  # safe/none
+
+    def test_s4_score_no_financials_returns_zero_no_penalty(self, agent_with_db):
+        agent, db = agent_with_db
+        # 没 seed → 查不到行
+        score = agent.calculate_s4_score(
+            {"source": "S4", "symbol": "999999"}
+        )
+        assert score == 0.0
+
+    def test_s4_score_d1_aggregates_industry_stocks(self, agent_with_db):
+        agent, db = agent_with_db
+        self._seed_related(db, "半导体", "600519")
+        self._seed_related(db, "半导体", "300750")
+        self._seed_financials(db, "600519", z=3.5, peg=0.5)  # 1.0
+        self._seed_financials(db, "300750", z=1.5, peg=0.5)  # 0.5
+        score = agent.calculate_s4_score({
+            "source": "D1",
+            "related_industries": ["半导体"],
+        })
+        assert abs(score - 0.75) < 0.001  # (1.0 + 0.5) / 2
+
+    def test_s4_score_d1_no_industries_returns_zero(self, agent_with_db):
+        agent, _ = agent_with_db
+        score = agent.calculate_s4_score({"source": "D1", "related_industries": []})
+        assert score == 0.0
+
+    def test_s4_score_d4_returns_zero(self, agent_with_db):
+        agent, _ = agent_with_db
+        score = agent.calculate_s4_score({"source": "D4"})
+        assert score == 0.0
+
+    def test_s4_score_picks_latest_period(self, agent_with_db):
+        agent, db = agent_with_db
+        self._seed_financials(db, "600519", z=0.5, peg=0.5, period="2023-12-31")
+        self._seed_financials(db, "600519", z=3.5, peg=0.5, period="2024-12-31")
+        score = agent.calculate_s4_score(
+            {"source": "S4", "symbol": "600519"}
+        )
+        assert score == 1.0  # 取 2024 数据
+
+    def test_z_band_boundaries(self):
+        assert GateAgent._z_band(2.60) == "safe"
+        assert GateAgent._z_band(2.59) == "grey"
+        assert GateAgent._z_band(1.10) == "grey"
+        assert GateAgent._z_band(1.09) == "distress"
+        assert GateAgent._z_band(None) is None
+
+    def test_peg_band_boundaries(self):
+        assert GateAgent._peg_band(0.99) == "cheap"
+        assert GateAgent._peg_band(1.00) == "fair"
+        assert GateAgent._peg_band(2.00) == "fair"
+        assert GateAgent._peg_band(2.01) == "expensive"
+        assert GateAgent._peg_band(None) == "none"
+        assert GateAgent._peg_band(0.0) == "none"
+
+
 class TestGateAgentIntegration:
     """Gate Agent集成测试"""
 

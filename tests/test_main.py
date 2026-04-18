@@ -634,7 +634,7 @@ class TestScoutRunnerSchedule:
                 "collect_D1", "collect_D4", "collect_V1",
                 "collect_V3", "collect_S4",
                 "weekly_industry_report", "weekly_paper_report",
-                "daily_briefing", "heartbeat",
+                "daily_briefing", "financial_refresh", "heartbeat",
             }
             assert job_ids == expected
         finally:
