@@ -1,11 +1,11 @@
 # Scout
 
-**多信源金融信号系统 · Phase 1 完成（2026-04-18）**
+**多信源金融信号系统 · Phase 2A 完成（2026-04-18）**
 
 覆盖中国 / 韩国 / 美国三地市场，为长期价值投资者（3-5 年持有）提供：
 
 - 多信源数据采集（国务院 D1 / arXiv + Semantic Scholar D4 / 国家统计局 V1 / 韩国关税厅 V3[Phase 1 阻塞] / AkShare S4）
-- Gemma 3 本地 LLM 信号抽取（policy_direction / mixed_subtype / confidence）
+- Gemma 4 本地 LLM 信号抽取（policy_direction / mixed_subtype / confidence）
 - 行业 dashboard + 周报生成
 - MCP stdio 接口（接入 Claude Desktop / OpenClaw）
 - 推送队列 + 调度器 + 优雅关闭
