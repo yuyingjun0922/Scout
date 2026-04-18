@@ -646,9 +646,10 @@ def fastmcp_app(impl):
 
 
 class TestFastMCPRegistration:
-    def test_lists_exactly_14_tools(self, fastmcp_app):
+    def test_lists_exactly_16_tools(self, fastmcp_app):
+        # v1.12：14 → 16（+ get_pending_messages / mark_read）
         tools = asyncio.run(fastmcp_app.list_tools())
-        assert len(tools) == 14
+        assert len(tools) == 16
 
     def test_all_expected_tools_present(self, fastmcp_app):
         tools = asyncio.run(fastmcp_app.list_tools())
@@ -663,6 +664,9 @@ class TestFastMCPRegistration:
             "bias_check",
             "recommend_stock",
             "get_motivation_status",
+            # v1.12 推送 Agent MCP 工具
+            "get_pending_messages",
+            "mark_read",
         }
         assert names == expected
 
@@ -821,3 +825,96 @@ class TestDataTypes:
             impl.search_signals("半导体"),
         ):
             json.dumps(r, ensure_ascii=False)  # 不应抛
+
+
+# ══════════════════════ v1.12 推送 Agent MCP 工具 ══════════════════════
+
+
+@pytest.fixture
+def tmp_push_impl(tmp_path, tmp_db, tmp_reports, tmp_logs):
+    """v1.12：带 push_queue 的 ScoutToolImpl 实例。"""
+    from knowledge.init_queue_db import init_queue_db
+    from infra.push_queue import PushQueue
+    from infra.queue_manager import QueueManager
+
+    db, _ = tmp_db
+    qdb_path = tmp_path / "queue.db"
+    init_queue_db(qdb_path)
+    qm = QueueManager(qdb_path)
+    pq = PushQueue(qm)
+    logger = build_access_logger(tmp_logs)
+    impl = ScoutToolImpl(
+        db=db, reports_dir=tmp_reports, access_logger=logger, push_queue=pq,
+    )
+    yield impl, pq
+    qm.close()
+
+
+class TestGetPendingMessages:
+    def test_empty_returns_zero(self, tmp_push_impl):
+        impl, _ = tmp_push_impl
+        r = impl.get_pending_messages()
+        assert r["ok"] is True
+        assert r["count"] == 0
+        assert r["messages"] == []
+
+    def test_filters_by_priority(self, tmp_push_impl):
+        impl, pq = tmp_push_impl
+        pq.push(message_type="alert", content={"alert_type": "motivation_drift",
+                "a": 1}, priority="red")
+        pq.push(message_type="recommendation", content={"x": 2}, priority="blue")
+
+        r_all = impl.get_pending_messages(priority="all")
+        assert r_all["count"] == 2
+
+        r_urgent = impl.get_pending_messages(priority="urgent")
+        assert r_urgent["count"] == 1
+        assert r_urgent["messages"][0]["priority"] == "red"
+
+        r_normal = impl.get_pending_messages(priority="normal")
+        assert r_normal["count"] == 1
+        assert r_normal["messages"][0]["priority"] == "blue"
+
+    def test_invalid_priority(self, tmp_push_impl):
+        impl, _ = tmp_push_impl
+        r = impl.get_pending_messages(priority="hot")
+        assert r["ok"] is False
+        assert "priority must be" in r["error"]
+
+    def test_invalid_max(self, tmp_push_impl):
+        impl, _ = tmp_push_impl
+        r = impl.get_pending_messages(max=9999)
+        assert r["ok"] is False
+
+    def test_no_push_queue_returns_error(self, impl):
+        """MCP 启动时若未注入 push_queue → 工具应返 ok=False。"""
+        r = impl.get_pending_messages()
+        assert r["ok"] is False
+        assert "push_queue" in r["error"]
+
+
+class TestMarkRead:
+    def test_marks_pending(self, tmp_push_impl):
+        impl, pq = tmp_push_impl
+        eid = pq.push(message_type="alert",
+                      content={"alert_type": "motivation_drift", "x": 1},
+                      priority="red")
+        r = impl.mark_read(eid)
+        assert r["ok"] is True
+        assert r["event_id"] == eid
+        assert r["status"] == "done"
+
+    def test_unknown_event_returns_error(self, tmp_push_impl):
+        impl, _ = tmp_push_impl
+        r = impl.mark_read("nonexistent_event_id_12345")
+        assert r["ok"] is False
+
+    def test_empty_event_id(self, tmp_push_impl):
+        impl, _ = tmp_push_impl
+        r = impl.mark_read("")
+        assert r["ok"] is False
+
+    def test_no_push_queue_returns_error(self, impl):
+        r = impl.mark_read("anything")
+        assert r["ok"] is False
+        assert "push_queue" in r["error"]
