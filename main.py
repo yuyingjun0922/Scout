@@ -16,7 +16,7 @@ CLI：
     python main.py --help
 
 serve 调度表：
-    D1 每 6h | D4 每 24h | V1 每日午夜 KST | V3 每 24h（Phase 1 无数据）| S4 每 12h
+    D1 每 6h | D4 每 24h | V1 每日午夜 KST | V3 每 24h（Playwright，v1.11） | S4 每 12h
     周报 industry：周一 07:00 KST
     周报 paper   ：周日 09:00 KST
     每日简报     ：每天 07:30 KST
@@ -208,8 +208,16 @@ class ScoutRunner:
             from infra.data_adapters.nbs import NBSCollector
             return NBSCollector(db=self.kdb)
         if source == "V3":
-            from infra.data_adapters.korea_customs import KoreaCustomsCollector
-            return KoreaCustomsCollector(db=self.kdb)
+            # v1.11: 默认使用 Playwright 实现。若环境没装 playwright，走 HTTP
+            # fallback（旧 KoreaCustomsCollector），会继续失败但不影响其它 source。
+            try:
+                from infra.data_adapters.korea_customs_playwright import (
+                    KoreaCustomsPlaywrightCollector,
+                )
+                return KoreaCustomsPlaywrightCollector(db=self.kdb)
+            except ImportError:
+                from infra.data_adapters.korea_customs import KoreaCustomsCollector
+                return KoreaCustomsCollector(db=self.kdb)
         if source == "S4":
             from infra.data_adapters.akshare_wrapper import AkShareCollector
             return AkShareCollector(db=self.kdb)
@@ -594,7 +602,7 @@ class ScoutRunner:
         schedule_matrix = [
             ("D1", IntervalTrigger(hours=6), stagger[0]),
             ("D4", IntervalTrigger(hours=24), stagger[1]),
-            ("V3", IntervalTrigger(hours=24), stagger[2]),  # Phase 1 将持续失败，预期
+            ("V3", IntervalTrigger(hours=24), stagger[2]),  # v1.11 起通过 Playwright 激活
             ("S4", IntervalTrigger(hours=12), stagger[3]),
         ]
         for source, trigger, first_delay in schedule_matrix:
