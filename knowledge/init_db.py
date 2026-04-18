@@ -1,8 +1,9 @@
 """
-knowledge/init_db.py — 创建knowledge.db及其全部20张表+索引
+knowledge/init_db.py — 创建knowledge.db及其全部21张表+索引
 
 对应Scout系统蓝图v1.61。所有时间字段存UTC ISO 8601（TEXT类型）。
 v1.57前置10项技术决策已纳入（industry_id主键、global_companies、mode字段等）。
+v1.03 新增 master_analysis 表（大师评分 history）。
 
 运行方式：
     python knowledge/init_db.py
@@ -394,6 +395,23 @@ CREATE TABLE IF NOT EXISTS rejected_stocks (
     updated_at TEXT                         -- UTC
 );
 CREATE INDEX IF NOT EXISTS idx_rs_stock ON rejected_stocks(stock);
+
+
+-- 21. 大师分析记录（v1.03 Master Agent）
+-- score: 0-100；芒格无打分，score=NULL
+-- verdict: 中文评价文本
+-- details: JSON 子分项明细
+CREATE TABLE IF NOT EXISTS master_analysis (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    stock TEXT NOT NULL,
+    master_name TEXT NOT NULL,              -- buffett/munger/duan/lynch/fisher
+    score INTEGER,                          -- 0-100；芒格 NULL
+    verdict TEXT,                           -- 中文评价
+    details TEXT,                           -- JSON 子分项
+    analyzed_at TEXT NOT NULL               -- UTC ISO 8601
+);
+CREATE INDEX IF NOT EXISTS idx_ma_stock_master ON master_analysis(stock, master_name);
+CREATE INDEX IF NOT EXISTS idx_ma_time ON master_analysis(analyzed_at);
 """
 
 
@@ -403,6 +421,7 @@ EXPECTED_TABLES = [
     "rules", "system_meta", "event_chains", "motivation_drift_log",
     "global_companies", "llm_invocations", "agent_errors", "recommendations",
     "user_decisions", "price_tracking", "review_results", "rejected_stocks",
+    "master_analysis",
 ]
 
 
@@ -473,7 +492,7 @@ if __name__ == "__main__":
     path = init_database()
     tables, indexes = _verify(path)
     print(f"[ok] knowledge.db created at: {path}")
-    print(f"[ok] tables: {len(tables)} / expected 20")
+    print(f"[ok] tables: {len(tables)} / expected {len(EXPECTED_TABLES)}")
     for t in tables:
         print(f"     - {t}")
     missing = [t for t in EXPECTED_TABLES if t not in tables]

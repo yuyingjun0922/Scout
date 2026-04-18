@@ -592,6 +592,26 @@ class ScoutToolImpl:
 
     # ════════════ (i) get_decision_context ════════════
 
+    def master_analysis(self, stock_code: str) -> Dict[str, Any]:
+        """5 大师评分（v1.03）。委托给 MasterAgent，缺数据降级返 ok=False。"""
+        def _impl() -> Dict[str, Any]:
+            if not isinstance(stock_code, str) or not stock_code.strip():
+                return {"ok": False, "error": "stock_code must be non-empty str"}
+            code = stock_code.strip()
+            if len(code) != 6 or not code.isdigit():
+                return {
+                    "ok": False,
+                    "error": f"stock_code 必须是 6 位数字，got {code!r}",
+                }
+            from agents.master_agent import MasterAgent
+            agent = MasterAgent(self.db)
+            return agent.analyze_stock(code)
+        return self._call(
+            "master_analysis", {"stock_code": stock_code}, _impl
+        )
+
+    # ════════════ (i) get_decision_context ════════════
+
     def get_decision_context(self, stock: str) -> Dict[str, Any]:
         def _impl() -> Dict[str, Any]:
             if not isinstance(stock, str) or not stock.strip():
@@ -852,6 +872,15 @@ def build_server(impl: "ScoutToolImpl") -> Any:
     ))
     def get_policy_for_motivation_analysis(info_unit_id: str) -> dict:
         return impl.get_policy_for_motivation_analysis(info_unit_id=info_unit_id)
+
+    @app.tool(description=(
+        "对单股运行 5 大师评分（巴菲特/芒格/段永平/林奇/费雪），"
+        "数据来自 stock_financials。参数：stock_code (必选, A 股 6 位代码)。"
+        "返回 {ok, stock, report (中文报告), results[{master, label, score, verdict, details}], "
+        "report_period, analyzed_at}。stock_financials 无该股数据 → ok=False + 提示先跑 financial_agent。"
+    ))
+    def master_analysis(stock_code: str) -> dict:
+        return impl.master_analysis(stock_code=stock_code)
 
     return app
 

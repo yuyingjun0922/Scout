@@ -3,7 +3,7 @@ tests/test_db_init.py — Step 2数据库建表测试
 
 覆盖：
     - knowledge.db / queue.db能创建
-    - 20张表全部存在
+    - 21张表全部存在（v1.03 加 master_analysis）
     - 所有索引都存在
     - 所有表初始行数为0
     - DatabaseManager能写入+读取
@@ -38,6 +38,7 @@ EXPECTED_INDEXES = [
     "idx_pt_recommend",
     "idx_rr_recommend",
     "idx_rs_stock",
+    "idx_ma_stock_master", "idx_ma_time",
 ]
 
 
@@ -69,9 +70,9 @@ def test_queue_db_created(queue_db):
     assert queue_db.stat().st_size > 0
 
 
-# ═══ 20张表 ═══
+# ═══ 21张表（v1.03 加 master_analysis）═══
 
-def test_knowledge_db_has_exactly_20_tables(knowledge_db):
+def test_knowledge_db_has_exactly_21_tables(knowledge_db):
     conn = sqlite3.connect(str(knowledge_db))
     tables = [
         r[0] for r in conn.execute(
@@ -80,7 +81,7 @@ def test_knowledge_db_has_exactly_20_tables(knowledge_db):
         ).fetchall()
     ]
     conn.close()
-    assert len(tables) == 20, f"Expected 20 tables, got {len(tables)}: {sorted(tables)}"
+    assert len(tables) == 21, f"Expected 21 tables, got {len(tables)}: {sorted(tables)}"
 
 
 def test_knowledge_db_all_expected_tables_present(knowledge_db):

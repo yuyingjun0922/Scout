@@ -881,6 +881,56 @@ def cmd_process(
         kdb.close()
 
 
+def cmd_masters(
+    *,
+    symbol: str,
+    kdb_path: Path,
+    logger: logging.Logger,
+) -> int:
+    """对单股运行 5 大师评分（v1.03 MasterAgent）。"""
+    import json as _json
+
+    from agents.master_agent import MasterAgent
+    from infra.db_manager import DatabaseManager
+
+    if sys.stdout.encoding and sys.stdout.encoding.lower() != "utf-8":
+        try:
+            sys.stdout.reconfigure(encoding="utf-8")
+        except Exception:
+            pass
+
+    if not symbol or len(symbol) != 6 or not symbol.isdigit():
+        logger.error(f"[cli:masters] invalid symbol: {symbol!r} (要 6 位数字)")
+        return 2
+
+    kdb = DatabaseManager(kdb_path)
+    try:
+        agent = MasterAgent(kdb)
+        out = agent.analyze_stock(symbol)
+        print(out["report"])
+        print()
+        print("--- JSON ---")
+        print(_json.dumps(
+            {k: v for k, v in out.items() if k != "report"},
+            ensure_ascii=False, indent=2,
+        ))
+        if not out.get("ok"):
+            logger.warning(f"[cli:masters] {symbol} ok=False: {out.get('error')}")
+            return 0  # 数据不足不算异常退出
+        scores = {
+            r["master"]: r["score"] for r in out.get("results", [])
+        }
+        logger.info(
+            f"[cli:masters] {symbol} period={out.get('report_period')} scores={scores}"
+        )
+        return 0
+    except Exception as e:
+        logger.error(f"[cli:masters] failed: {type(e).__name__}: {e}")
+        return 1
+    finally:
+        kdb.close()
+
+
 def cmd_report(
     report_type: str,
     *,
@@ -1014,6 +1064,9 @@ def build_arg_parser() -> argparse.ArgumentParser:
 
     sub.add_parser("status", help="系统状态快照")
 
+    masters_p = sub.add_parser("masters", help="对单股运行 5 大师评分（v1.03）")
+    masters_p.add_argument("--symbol", required=True, help="A 股 6 位代码")
+
     return parser
 
 
@@ -1105,6 +1158,13 @@ def main(argv: Optional[List[str]] = None) -> int:
             ollama_host=ollama_host, ollama_model=ollama_model,
             logger=logger,
             max_messages=args.max_messages,
+        )
+
+    if args.command == "masters":
+        return cmd_masters(
+            symbol=args.symbol,
+            kdb_path=paths["kdb_path"],
+            logger=logger,
         )
 
     if args.command == "report":
