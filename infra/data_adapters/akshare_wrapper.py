@@ -135,6 +135,9 @@ class AkShareCollector(Collector, BaseAgent):
         错误映射：
             网络/超时/OSError  → NetworkError
             其它异常           → ParseError
+
+        2026-04-19 P0：对 3 只种子股票稳定 RemoteDisconnected，
+        加 1 次 2 秒背退重试；两次都挂才归类 NetworkError。
         """
         import akshare as ak  # 延迟 import：未安装 akshare 时也能被 mock
 
@@ -142,26 +145,41 @@ class AkShareCollector(Collector, BaseAgent):
         start = (today - timedelta(days=max(days * 2, 14))).strftime("%Y%m%d")
         end = today.strftime("%Y%m%d")
 
-        try:
-            return ak.stock_zh_a_hist(
-                symbol=symbol,
-                period="daily",
-                start_date=start,
-                end_date=end,
-                adjust="qfq",
-            )
-        except (ConnectionError, TimeoutError, OSError) as e:
-            raise NetworkError(
-                f"AkShare network err for {symbol}: {type(e).__name__}: {e}"
-            ) from e
-        except Exception as e:
-            # AkShare 内部异常多样：HTTPError/JSONDecodeError/ValueError 等
-            msg = str(e).lower()
-            if any(k in msg for k in ("timeout", "connection", "network", "resolve")):
-                raise NetworkError(f"AkShare net-like err for {symbol}: {e}") from e
-            raise ParseError(
-                f"AkShare call err for {symbol}: {type(e).__name__}: {e}"
-            ) from e
+        last_exc: Optional[BaseException] = None
+        for attempt in range(2):
+            try:
+                return ak.stock_zh_a_hist(
+                    symbol=symbol,
+                    period="daily",
+                    start_date=start,
+                    end_date=end,
+                    adjust="qfq",
+                )
+            except (ConnectionError, TimeoutError, OSError) as e:
+                last_exc = e
+                if attempt == 0:
+                    time.sleep(2)
+                    continue
+                raise NetworkError(
+                    f"AkShare network err for {symbol}: {type(e).__name__}: {e}"
+                ) from e
+            except Exception as e:
+                # AkShare 内部异常多样：HTTPError/JSONDecodeError/ValueError 等
+                msg = str(e).lower()
+                net_like = any(k in msg for k in ("timeout", "connection", "network", "resolve", "disconnect"))
+                if net_like and attempt == 0:
+                    last_exc = e
+                    time.sleep(2)
+                    continue
+                if net_like:
+                    raise NetworkError(f"AkShare net-like err for {symbol}: {e}") from e
+                raise ParseError(
+                    f"AkShare call err for {symbol}: {type(e).__name__}: {e}"
+                ) from e
+        # 不可达，防护返回
+        if last_exc is not None:
+            raise NetworkError(f"AkShare network err for {symbol}: {last_exc}") from last_exc
+        return None
 
     # ── 辅助 ──
 

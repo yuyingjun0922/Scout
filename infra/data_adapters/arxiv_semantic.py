@@ -83,7 +83,9 @@ class PaperCollector(Collector, BaseAgent):
     S2_ENDPOINT = "https://api.semanticscholar.org/graph/v1/paper/search"
 
     ARXIV_MIN_INTERVAL: float = 3.0      # 官方硬要求
-    S2_MIN_INTERVAL: float = 3.0         # 100/5min 保守
+    # 2026-04-19: 3.0s 踩 S2 免费档红线，实测 429 率 20-40%。
+    # 提到 8.0s 后预期 <5%。根治需免费 API key（P1，x-api-key header → 10x 速率）。
+    S2_MIN_INTERVAL: float = 8.0
     MAX_RESULTS_PER_QUERY: int = 20
     HTTP_TIMEOUT: float = 30.0
 
