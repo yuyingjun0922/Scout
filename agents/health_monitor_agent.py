@@ -50,6 +50,53 @@ YELLOW_RED_THRESHOLD = 2     # count ≤ 阈值 → yellow；> 阈值 → red
 KST = ZoneInfo("Asia/Seoul")
 
 
+# ══ v1.15 告警抑制清单（临时，带 TTL 防止变成永久盲区） ══
+# 格式: (agent_name, error_message_substring) → {reason, until}
+#   agent_name       : agent_errors.agent_name 精确匹配
+#   substring        : error_message 子串匹配（任一错误命中即抑制）
+#   until            : UTC-aware datetime；now >= until 时抑制自动失效
+# 添加条目时必须同步：(1) 真实根因描述；(2) 有限到期日；(3) 彻底修复的追踪项。
+SUPPRESSED_ERRORS: Dict[tuple, Dict[str, Any]] = {
+    ("akshare_s4", "RemoteDisconnected"): {
+        "reason": "东财服务端拒绝 akshare 默认 UA，确定性拒连；P2 新浪 fallback 待做",
+        "until": datetime(2026, 4, 27, tzinfo=KST),
+    },
+    ("akshare_s4", "ConnectionError"): {
+        "reason": "同上，兜底 ConnectionError 变体",
+        "until": datetime(2026, 4, 27, tzinfo=KST),
+    },
+}
+
+
+def _is_suppressed(
+    agent_name: str,
+    errors: List[sqlite3.Row],
+    suppression_map: Optional[Dict[tuple, Dict[str, Any]]] = None,
+    now_utc_dt: Optional[datetime] = None,
+) -> Optional[Dict[str, Any]]:
+    """若 (agent_name, 错误消息) 命中抑制清单则返回 cfg（附 pattern 字段），否则 None。
+
+    未命中条件：
+      - 该 agent 无条目
+      - 条目 until 已过
+      - 无错误消息含 pattern 子串
+    参数注入（suppression_map / now_utc_dt）只用于测试。
+    """
+    if suppression_map is None:
+        suppression_map = SUPPRESSED_ERRORS
+    if now_utc_dt is None:
+        now_utc_dt = datetime.now(tz=timezone.utc)
+    for (supp_agent, supp_pattern), cfg in suppression_map.items():
+        if supp_agent != agent_name:
+            continue
+        until = cfg.get("until")
+        if until and now_utc_dt >= until:
+            continue
+        if any(supp_pattern in (e["error_message"] or "") for e in errors):
+            return {**cfg, "pattern": supp_pattern}
+    return None
+
+
 class HealthMonitorAgent(BaseAgent):
     """v1.13 健康监控：近期错误扫描 + 每日心跳。"""
 
@@ -98,8 +145,25 @@ class HealthMonitorAgent(BaseAgent):
 
         bucket = int(time.time()) // ERROR_BUCKET_SECONDS
         pushed: List[Dict[str, Any]] = []
+        suppressed: List[Dict[str, Any]] = []
         for agent_name, errs in groups.items():
             count = len(errs)
+
+            # v1.15 抑制：命中则跳过 push（log 可见，queue 不落）
+            hit = _is_suppressed(agent_name, errs)
+            if hit is not None:
+                until_str = hit["until"].strftime("%Y-%m-%d") if hit.get("until") else "n/a"
+                self.logger.info(
+                    f"[suppress] {agent_name} 告警被屏蔽 count={count} "
+                    f"pattern={hit['pattern']!r} reason={hit['reason']} until={until_str}"
+                )
+                suppressed.append({
+                    "agent": agent_name, "count": count,
+                    "pattern": hit["pattern"], "reason": hit["reason"],
+                    "until": until_str,
+                })
+                continue
+
             priority = "red" if count > YELLOW_RED_THRESHOLD else "yellow"
             signals = [
                 f"[{e['error_type']}] {(e['error_message'] or '')[:100]}"
@@ -141,8 +205,10 @@ class HealthMonitorAgent(BaseAgent):
             "checked_errors": len(rows),
             "agents_with_errors": len(groups),
             "alerts_pushed": len(pushed),
+            "alerts_suppressed": len(suppressed),
             "window_minutes": window_minutes,
             "pushed": pushed,
+            "suppressed": suppressed,
             "ts_utc": now_utc(),
             "ok": True,
         }
