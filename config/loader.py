@@ -18,9 +18,15 @@ from typing import Dict, Literal, Optional
 import yaml
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
+try:
+    from dotenv import load_dotenv
+except ImportError:
+    load_dotenv = None  # type: ignore[assignment]
+
 
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
 DEFAULT_CONFIG_PATH = PROJECT_ROOT / "config.yaml"
+DEFAULT_DOTENV_PATH = PROJECT_ROOT / ".env"
 
 PHASE1_REQUIRED_SOURCES = frozenset({"D1", "D4", "V1", "V3", "S4"})
 
@@ -95,6 +101,25 @@ class TestingConfig(BaseModel):
     fixture_dir: str = Field(..., min_length=1)
 
 
+class QQPushConfig(BaseModel):
+    """v1.13 Phase 2A — QQ 开放平台 C2C 主动推送配置（可选）。
+
+    所有 secrets 通过 .env 注入（loader.load_config 里执行 env 覆盖）；
+    config.yaml 里只放空串占位符，明文不入 YAML/CI。
+    运行期缺失 secrets 由 QQPushChannel.__init__ 的 ValueError 兜底，
+    保持 YAML schema 宽松（test 可传 env={} 且仍过校验）。
+    """
+
+    model_config = ConfigDict(extra='forbid')
+
+    enabled: bool = True
+    user_openid: str = Field(default="")             # env: QQ_USER_OPENID
+    app_id: str = Field(default="")                  # env: QQ_BOT_APP_ID
+    client_secret: str = Field(default="")           # env: QQ_BOT_SECRET
+    rate_limit_per_minute: int = Field(default=10, ge=1, le=60)
+    max_content_length: int = Field(default=900, ge=10, le=4000)
+
+
 # ═══ 根 schema ═══
 
 class ScoutConfig(BaseModel):
@@ -110,6 +135,7 @@ class ScoutConfig(BaseModel):
     timezone: str = Field(..., min_length=1)
     testing: TestingConfig
     mode: Literal['cold_start', 'running', 'diagnosis']
+    qq_push: Optional[QQPushConfig] = None
 
     @model_validator(mode='after')
     def _check_phase1_sources(self) -> 'ScoutConfig':
@@ -144,6 +170,10 @@ def load_config(
         config_path = DEFAULT_CONFIG_PATH
     config_path = Path(config_path)
 
+    # v1.13+ — 自动加载项目根 .env（显式 env={} 时跳过，保持测试确定性）
+    if env is None and load_dotenv is not None and DEFAULT_DOTENV_PATH.exists():
+        load_dotenv(DEFAULT_DOTENV_PATH, override=False)
+
     if not config_path.exists():
         raise FileNotFoundError(f"Scout config not found: {config_path}")
 
@@ -170,5 +200,17 @@ def load_config(
     scout_mode = env.get('SCOUT_MODE')
     if scout_mode:
         raw['mode'] = scout_mode
+
+    # v1.13+ — QQ secrets 全部走 env 注入（不把明文入 YAML/CI）
+    for yaml_key, env_key in (
+        ('app_id', 'QQ_BOT_APP_ID'),
+        ('client_secret', 'QQ_BOT_SECRET'),
+        ('user_openid', 'QQ_USER_OPENID'),
+    ):
+        val = env.get(env_key)
+        if val:
+            qq_section = raw.get('qq_push')
+            if isinstance(qq_section, dict):
+                qq_section[yaml_key] = val
 
     return ScoutConfig(**raw)

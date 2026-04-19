@@ -173,6 +173,7 @@ class ScoutRunner:
         d1_keywords: Optional[List[str]] = None,
         d4_industries_keywords: Optional[Dict[str, List[str]]] = None,
         gemma_available: bool = True,
+        qq_channel: Optional[Any] = None,
     ):
         self.kdb = kdb
         self.qdb = qdb
@@ -184,6 +185,7 @@ class ScoutRunner:
         self.d1_keywords = d1_keywords or DEFAULT_D1_KEYWORDS
         self.d4_industries_keywords = d4_industries_keywords
         self.gemma_available = gemma_available
+        self.qq_channel = qq_channel  # v1.13：外部推送通道（QQPushChannel 或 None）
 
         self.shutdown_event: Optional[asyncio.Event] = None
         self.scheduler: Optional[Any] = None
@@ -192,6 +194,7 @@ class ScoutRunner:
         self.signal_agent: Optional[Any] = None
         self.direction_agent: Optional[Any] = None
         self.push_consumer: Optional[Any] = None  # v1.12 lazy
+        self.health_monitor: Optional[Any] = None  # v1.13 lazy
 
     # ── Collector factory ──
 
@@ -576,6 +579,62 @@ class ScoutRunner:
         except Exception as e:
             self._handle_failure("push_consumer_digest", e)
 
+    async def job_push_consumer_deliver(self) -> None:
+        """v1.13：每 10 分钟把 push_outbox pending → QQ（告警快速送达）。
+
+        需要 self.qq_channel 注入；否则 skip（Phase 1 MCP 拉取模式仍可用）。
+        """
+        if self.qq_channel is None:
+            return
+        consumer = self._build_push_consumer()
+        if consumer is None:
+            return
+        try:
+            result = await self._run_in_thread(
+                consumer.deliver_pending, self.qq_channel, 20
+            )
+            if result["delivered"] or result["failed"]:
+                self.logger.info(
+                    f"[push_consumer:deliver] delivered={result['delivered']} "
+                    f"failed={result['failed']} "
+                    f"skipped={result['skipped_filter']}"
+                )
+            self._clear_failure("push_consumer_deliver")
+        except Exception as e:
+            self._handle_failure("push_consumer_deliver", e)
+
+    async def job_health_check_errors(self) -> None:
+        """v1.13：每 15 分钟扫 agent_errors，近期错误 → push_alert(data_source_down)。"""
+        monitor = self._build_health_monitor()
+        if monitor is None:
+            return
+        try:
+            result = await self._run_in_thread(monitor.run_check_errors, 15)
+            if result.get("alerts_pushed", 0):
+                self.logger.info(
+                    f"[health:check_errors] checked={result['checked_errors']} "
+                    f"agents={result['agents_with_errors']} "
+                    f"alerts={result['alerts_pushed']}"
+                )
+            self._clear_failure("health_check_errors")
+        except Exception as e:
+            self._handle_failure("health_check_errors", e)
+
+    async def job_health_heartbeat(self) -> None:
+        """v1.13：每日 09:30 KST 生成 system_health 心跳 → push_alert(white)。"""
+        monitor = self._build_health_monitor()
+        if monitor is None:
+            return
+        try:
+            result = await self._run_in_thread(monitor.run_daily_heartbeat)
+            self.logger.info(
+                f"[health:heartbeat] event_id={str(result.get('event_id'))[:8]} "
+                f"ok={result.get('ok')}"
+            )
+            self._clear_failure("health_heartbeat")
+        except Exception as e:
+            self._handle_failure("health_heartbeat", e)
+
     async def job_heartbeat(self) -> None:
         try:
             stats = await self._run_in_thread(
@@ -724,6 +783,17 @@ class ScoutRunner:
                 kdb=self.kdb, push_queue=self.push_queue
             )
         return self.push_consumer
+
+    def _build_health_monitor(self) -> Optional[Any]:
+        """v1.13：lazy-build HealthMonitorAgent。push_queue 缺失返 None。"""
+        if self.push_queue is None:
+            return None
+        if self.health_monitor is None:
+            from agents.health_monitor_agent import HealthMonitorAgent
+            self.health_monitor = HealthMonitorAgent(
+                kdb=self.kdb, push_queue=self.push_queue,
+            )
+        return self.health_monitor
 
     # ── 失败计数与告警 ──
 
@@ -877,6 +947,36 @@ class ScoutRunner:
             self.job_push_daily_digest,
             CronTrigger(hour=9, minute=30, timezone=KST),
             id="push_consumer_digest",
+            replace_existing=True, max_instances=1,
+            misfire_grace_time=3600,
+        )
+
+        # v1.13：push_outbox → QQ 投递（每 10 分钟；告警应快速送达）
+        #   qq_channel 未注入时 job 自动 skip
+        self.scheduler.add_job(
+            self.job_push_consumer_deliver,
+            IntervalTrigger(minutes=10),
+            id="push_consumer_deliver",
+            next_run_time=now_utc + timedelta(seconds=stagger[4] + 60),
+            replace_existing=True, max_instances=1, coalesce=True,
+            misfire_grace_time=600,
+        )
+
+        # v1.13：health_monitor — agent_errors 扫描（每 15 分钟）
+        self.scheduler.add_job(
+            self.job_health_check_errors,
+            IntervalTrigger(minutes=15),
+            id="health_check_errors",
+            next_run_time=now_utc + timedelta(seconds=stagger[4] + 120),
+            replace_existing=True, max_instances=1, coalesce=True,
+            misfire_grace_time=900,
+        )
+
+        # v1.13：health_monitor — 每日心跳（09:30 KST）
+        self.scheduler.add_job(
+            self.job_health_heartbeat,
+            CronTrigger(hour=9, minute=30, timezone=KST),
+            id="health_heartbeat",
             replace_existing=True, max_instances=1,
             misfire_grace_time=3600,
         )
@@ -1782,12 +1882,26 @@ def main(argv: Optional[List[str]] = None) -> int:
         qm = QueueManager(paths["qdb_path"])
         try:
             push_queue = PushQueue(qm)
+
+            # v1.13：构造 QQ 推送通道（若配置启用）
+            qq_channel = None
+            if cfg.qq_push is not None and cfg.qq_push.enabled:
+                from infra.qq_channel import build_qq_channel_from_config
+                qq_channel = build_qq_channel_from_config(cfg.qq_push)
+                logger.info(
+                    f"[serve] qq_channel enabled, user_openid="
+                    f"{cfg.qq_push.user_openid[:12]}..."
+                )
+            else:
+                logger.info("[serve] qq_channel disabled (cfg.qq_push is None or disabled)")
+
             runner = ScoutRunner(
                 kdb=kdb, qdb=qm, push_queue=push_queue,
                 logger=logger,
                 reports_dir=paths["reports_dir"],
                 ollama_host=ollama_host, ollama_model=ollama_model,
                 gemma_available=gemma_ok,
+                qq_channel=qq_channel,
             )
             return asyncio.run(
                 runner.run(max_runtime_seconds=args.max_runtime_seconds)

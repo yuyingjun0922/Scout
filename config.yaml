@@ -71,3 +71,14 @@ testing:
 
 # ═══ 运行模式 ═══
 mode: cold_start                          # cold_start / running / diagnosis
+
+# ═══ QQ 主动推送（v1.13 Phase 2A）═══
+# 通过 QQ 开放平台 C2C API 把 push_outbox 里的消息推到指定用户。
+# 所有 secrets 通过 .env 注入（见 .env.example）；明文不入 YAML/CI。
+qq_push:
+  enabled: true
+  user_openid: ""                          # 从 env QQ_USER_OPENID 注入
+  app_id: ""                               # 从 env QQ_BOT_APP_ID 注入
+  client_secret: ""                        # 从 env QQ_BOT_SECRET 注入
+  rate_limit_per_minute: 10                # 防刷屏：1 分钟最多 N 条
+  max_content_length: 900                  # 单条 QQ 消息文本上限

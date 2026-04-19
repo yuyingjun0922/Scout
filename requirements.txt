@@ -5,6 +5,7 @@
 # ══ 核心 ══
 pydantic>=2.0           # contracts/ pydantic v2 严格契约
 pyyaml                  # config.yaml / cold_start_config.yaml 加载
+python-dotenv>=1.0      # .env 加载（QQ_BOT_SECRET 等 secret，v1.13+）
 httpx                   # 网络采集（gov.cn / S2 / arxiv / Ollama ping）
 tzdata                  # Windows：zoneinfo.ZoneInfo("Asia/Seoul") 的数据源
 

@@ -62,6 +62,7 @@ VALID_ALERT_TYPES = frozenset({
     "motivation_drift",
     "data_source_down",
     "cost_exceeded",
+    "system_health",        # v1.13 心跳（每日 09:30 KST health_monitor）
 })
 
 # 周报 type

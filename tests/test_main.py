@@ -639,6 +639,9 @@ class TestScoutRunnerSchedule:
                 "backfill_direction", "heartbeat",
                 # v1.12 推送 Agent
                 "push_consumer_scan", "push_consumer_digest",
+                # v1.13 外发 + 健康监控
+                "push_consumer_deliver",
+                "health_check_errors", "health_heartbeat",
             }
             assert job_ids == expected
         finally:

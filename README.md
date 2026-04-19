@@ -38,25 +38,25 @@ python scripts/phase1_acceptance.py
 
 ## 命令速查
 
-| 命令 | 作用 |
-|---|---|
-| `python main.py serve` | 长跑模式（调度器 + 消费循环）|
-| `python main.py mcp` | MCP stdio server（Claude Desktop 接入）|
-| `python main.py collect --source D1 --days 7` | 手动采集 |
-| `python main.py report --type industry` | 手动生成周报 |
-| `python main.py status` | 系统状态快照 |
-| `pytest tests/ -q` | 全量测试（1031 passing）|
+| 命令                                            | 作用                                  |
+| --------------------------------------------- | ----------------------------------- |
+| `python main.py serve`                        | 长跑模式（调度器 + 消费循环）                    |
+| `python main.py mcp`                          | MCP stdio server（Claude Desktop 接入） |
+| `python main.py collect --source D1 --days 7` | 手动采集                                |
+| `python main.py report --type industry`       | 手动生成周报                              |
+| `python main.py status`                       | 系统状态快照                              |
+| `pytest tests/ -q`                            | 全量测试（1031 passing）                  |
 
 ---
 
 ## 文档
 
-| 文档 | 用途 |
-|---|---|
-| [docs/Scout操作手册_Phase1.md](docs/Scout操作手册_Phase1.md) | **日常使用手册**（每日流程 / 必做清单 / L4 决策辅助 / Phase 2A 预告） |
-| [docs/mcp_integration.md](docs/mcp_integration.md) | Claude Desktop / OpenClaw MCP 接入配置 |
-| [CLAUDE.md](CLAUDE.md) | Claude Code 项目记忆（架构决策 / 技术债 / Phase 2A 入口）|
-| [scripts/cold_start_config.yaml](scripts/cold_start_config.yaml) | 冷启动录入的 15 行业 + 5 原则 |
+| 文档                                                               | 用途                                              |
+| ---------------------------------------------------------------- | ----------------------------------------------- |
+| [docs/Scout操作手册_Phase1.md](docs/Scout操作手册_Phase1.md)             | **日常使用手册**（每日流程 / 必做清单 / L4 决策辅助 / Phase 2A 预告） |
+| [docs/mcp_integration.md](docs/mcp_integration.md)               | Claude Desktop / OpenClaw MCP 接入配置              |
+| [CLAUDE.md](CLAUDE.md)                                           | Claude Code 项目记忆（架构决策 / 技术债 / Phase 2A 入口）      |
+| [scripts/cold_start_config.yaml](scripts/cold_start_config.yaml) | 冷启动录入的 15 行业 + 5 原则                             |
 
 ---
 
@@ -83,12 +83,12 @@ Scout/
 
 ## 状态（Phase 1）
 
-| 指标 | 数值 |
-|---|---|
-| 已完成 Step | 1–14 / 14 |
-| 测试通过 | **1031 / 1031** |
-| 验收通过 | **14 / 14** |
-| 行业已录入 | 15（14 active + 1 observation）|
-| 投资原则 | 5（P1-P5，结构化 dict）|
+| 指标       | 数值                            |
+| -------- | ----------------------------- |
+| 已完成 Step | 1–14 / 14                     |
+| 测试通过     | **1031 / 1031**               |
+| 验收通过     | **14 / 14**                   |
+| 行业已录入    | 15（14 active + 1 observation） |
+| 投资原则     | 5（P1-P5，结构化 dict）             |
 
 **下一步 → Phase 2A**：推荐 Agent + V3 Playwright + 财务一体化（见 [CLAUDE.md §6](CLAUDE.md)）

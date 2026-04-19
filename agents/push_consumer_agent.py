@@ -480,8 +480,172 @@ class PushConsumerAgent(BaseAgent):
         """MCP 用户点 mark_read → PushQueue.mark_delivered。"""
         return self.push_queue.mark_delivered(event_id)
 
+    # ─────────────── 外部通道投递（v1.13 QQ）───────────────
+
+    def deliver_pending(
+        self,
+        channel: Any,
+        max: int = 10,
+        producer: Optional[str] = None,
+        entity_key_prefix: Optional[str] = None,
+    ) -> Dict[str, Any]:
+        """把 pending 消息通过 channel.send(text) 投递到外部（QQ/Telegram 等）。
+
+        channel 接口契约：`send(text: str) -> (ok: bool, detail: dict)`，不 raise。
+
+        过滤：
+            producer          — 只投递指定 producer（例如 'manual_test'）
+            entity_key_prefix — entity_key.startswith(前缀) 才投递
+
+        语义：
+            ok=True  → PushQueue.mark_delivered(event_id)
+            ok=False → PushQueue.mark_failed(event_id, reason)
+                       （retries < MAX 会被 push_queue 回滚为 pending，MAX 后才 failed）
+
+        返回：{delivered, failed, skipped_filter, total_considered, errors[≤5], ts_utc}
+        """
+        if channel is None or not hasattr(channel, "send"):
+            raise RuleViolation("channel must expose send(text)->(ok,detail)")
+
+        # 多取一些再在内存过滤（queue 里 filter 代价也不小）
+        raw_pending = self.push_queue.poll_pending(max=max * 3)
+        considered: List[Dict[str, Any]] = []
+        skipped_filter = 0
+        for m in raw_pending:
+            if producer is not None and m.get("producer") != producer:
+                skipped_filter += 1
+                continue
+            if entity_key_prefix is not None and not (m.get("entity_key") or "").startswith(
+                entity_key_prefix
+            ):
+                skipped_filter += 1
+                continue
+            considered.append(m)
+            if len(considered) >= max:
+                break
+
+        delivered = 0
+        failed = 0
+        errors: List[Dict[str, Any]] = []
+        for m in considered:
+            text = _format_for_qq(m)
+            try:
+                ok, detail = channel.send(text)
+            except Exception as e:
+                ok, detail = False, {"error": f"channel_raised: {type(e).__name__}: {e}"}
+
+            if ok:
+                self.push_queue.mark_delivered(m["event_id"])
+                delivered += 1
+                self.logger.info(
+                    f"[push_consumer] delivered event_id={m['event_id']} "
+                    f"msg_type={m.get('message_type')} priority={m.get('priority')}"
+                )
+            else:
+                reason = str(detail.get("error") or detail.get("http_status") or "unknown")[:120]
+                self.push_queue.mark_failed(m["event_id"], f"channel_send: {reason}")
+                failed += 1
+                if len(errors) < 5:
+                    errors.append({"event_id": m["event_id"], "detail": detail})
+                self.logger.warning(
+                    f"[push_consumer] send_failed event_id={m['event_id']} detail={detail}"
+                )
+
+        return {
+            "delivered": delivered,
+            "failed": failed,
+            "skipped_filter": skipped_filter,
+            "total_considered": len(considered),
+            "errors": errors,
+            "ts_utc": now_utc(),
+        }
+
 
 # ═══════════════════ 工具 ═══════════════════
+
+_MT_PREFIX = {
+    "alert": "🔴",
+    "recommendation": "🏆",
+    "daily_briefing": "📅",
+    "weekly_report": "📊",
+}
+
+
+def _format_for_qq(m: Dict[str, Any], max_len: int = 900) -> str:
+    """结构化 push 消息 dict → 适合 QQ C2C 的短文本（≤ max_len 字符）。
+
+    不同 message_type 分支展示：保留 stock / industry / state / alert_type 等关键字段。
+    未知类型 fallback 为 content JSON 截断。
+    """
+    mt = m.get("message_type") or "message"
+    priority = m.get("priority") or "blue"
+    content = m.get("content") or {}
+    head = f"{_MT_PREFIX.get(mt, '📨')} [{mt} · {priority}]"
+    lines: List[str] = [head]
+
+    if mt == "alert":
+        at = content.get("alert_type") or "unknown"
+        # v1.13 心跳特判：🟢 替代默认 🔴
+        if at == "system_health":
+            lines[0] = f"🟢 [health · {priority}]"
+        lines.append(f"类型: {at}")
+        for k, label in (
+            ("industry", "行业"),
+            ("state", "状态"),
+            ("stock", "股票"),
+            ("agent", "Agent"),
+            ("z_score", "Z分"),
+            ("anchor", "锚点"),
+            ("note", "备注"),
+        ):
+            v = content.get(k)
+            if v not in (None, ""):
+                lines.append(f"{label}: {v}")
+        sigs = content.get("signals")
+        if isinstance(sigs, list) and sigs:
+            lines.append(f"信号数: {len(sigs)}")
+    elif mt == "recommendation":
+        lines.append(
+            f"股票: {content.get('stock', '?')}  等级: {content.get('level', '?')}  "
+            f"总分: {content.get('total_score', '?')}"
+        )
+        if content.get("industry"):
+            lines.append(f"行业: {content['industry']}")
+        cc = content.get("counter_card")
+        if isinstance(cc, dict):
+            risks = cc.get("risks") or []
+            if risks:
+                lines.append(f"风险: {risks[0]}")
+    elif mt == "daily_briefing":
+        count = content.get("count")
+        if count is not None:
+            lines.append(f"待读: {count} 条")
+        h = content.get("highlights") or []
+        if isinstance(h, list) and h:
+            lines.append("Highlights:")
+            for x in h[:5]:
+                lines.append(f"· {x}")
+        note = content.get("note")
+        if isinstance(note, str) and note:
+            lines.append(note[:200])
+    elif mt == "weekly_report":
+        rt = content.get("report_type") or "report"
+        rd = content.get("report_date") or ""
+        lines.append(f"类型: {rt}  日期: {rd}")
+        preview = content.get("report_preview") or ""
+        if preview:
+            lines.append(preview[:500])
+    else:
+        try:
+            lines.append(json.dumps(content, ensure_ascii=False)[:500])
+        except Exception:
+            lines.append(str(content)[:500])
+
+    text = "\n".join(lines)
+    if len(text) > max_len:
+        text = text[: max_len - 3] + "..."
+    return text
+
 
 def _preview_content(content: Any, max_len: int = 200) -> str:
     """content dict → 简短中文预览字符串（给 digest 用）。"""
