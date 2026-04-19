@@ -59,11 +59,11 @@ KST = ZoneInfo("Asia/Seoul")
 SUPPRESSED_ERRORS: Dict[tuple, Dict[str, Any]] = {
     ("akshare_s4", "RemoteDisconnected"): {
         "reason": "东财服务端拒绝 akshare 默认 UA，确定性拒连；P2 新浪 fallback 待做",
-        "until": datetime(2026, 4, 27, tzinfo=KST),
+        "until": datetime(2026, 4, 24, tzinfo=KST),
     },
     ("akshare_s4", "ConnectionError"): {
         "reason": "同上，兜底 ConnectionError 变体",
-        "until": datetime(2026, 4, 27, tzinfo=KST),
+        "until": datetime(2026, 4, 24, tzinfo=KST),
     },
 }
 
