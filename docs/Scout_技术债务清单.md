@@ -298,6 +298,57 @@ backup: `data/backups/knowledge.db.pre_v169_fields_20260424_*`
 
 ---
 
+## TD-009 · RecommendationAgent Stage 2 Sonnet 层未实装
+
+- **优先级**：🟡 中
+- **发现日期**：2026-04-24
+- **归属模块**：`agents/recommendation_agent.py` + `config.yaml` + `recommendations` schema
+- **状态**：延迟修（触发条件满足前不动）
+
+### 现象
+
+v1.07 声称"规则 + Sonnet LLM 两阶段"，实际只有规则层在运行：
+
+- `llm_invocations` 表 **63 条全是 Gemma**，零 Sonnet
+- `ANTHROPIC_API_KEY` 未设置
+- `recommendations` 表缺 `llm_reasoning` / `rationale` 字段（规则层无从写入 LLM 理由）
+
+### 影响
+
+- 228 条推荐**全部基于纯规则层 6 维度评分**，"规则 + LLM"的宣称名不副实
+- 规则层和 LLM 层对 A 级判断的差异**无法观测**（没数据）
+- v1.65 成本监控**是瞎子**：没云端调用 = 永远 0 成本，看不到真实开销曲线
+
+### 为什么不立即修
+
+- **规则层当前准确率未知**，需 3~6 个月观察期才能判断"规则层够不够用"
+- 盲目加 Sonnet stage 只会**增加成本**（每条推荐 API 调用）但**不保证质量提升**
+- v1.07 原设计里"规则层 + Sonnet 判断一致时跳过 Sonnet"的逻辑可能**反而是对的**（节省成本）— 只是目前判断一致性无数据支撑
+
+### 修复触发条件（任一满足再做）
+
+1. 观察 3 个月，规则层 A 级**命中率 < 60%** → 需要 LLM 二审纠偏
+2. 规则层边界 case（65~74 分 B 级）需要**人工介入太多** → 需要 LLM 自动判断替代
+3. 决策 Agent 对比验证机制上线（蓝图 v1.12 防循环论证）→ 需要 Sonnet 独立判断
+
+### 修复时必须同步做
+
+1. `recommendations` 加 `llm_reasoning TEXT` 字段（新 ALTER TABLE，走 `scripts/migrations/`）
+2. `config.yaml` 启用 `api_key_required: true`
+3. `.env` 加 `ANTHROPIC_API_KEY`（**不进 config.yaml/DB**，遵循核心约束第 9 条）
+4. `llm_invocations` 的 writer 覆盖 Sonnet path（目前只在 Gemma path 写）
+5. v1.65 成本监控先把 Sonnet 调用真的记进来再谈（此前所有"成本曲线"都是空集）
+
+### 预期工作量（真到修的那天）
+
+- schema migration + init_db 同步：0.5 天
+- recommendation_agent 接 Anthropic SDK + Stage 2 逻辑：1 天
+- llm_invocations writer 覆盖 Sonnet + 成本字段：0.5 天
+- 回归 + 对照测试（规则层 vs LLM 层一致性）：1 天
+- **合计约 3 天**（触发条件满足后再启动）
+
+---
+
 ## TD-001（历史：Ollama helper 代码重复等）
 
 > 见 [CLAUDE.md §5 重要技术债务](../CLAUDE.md) 原清单（Ollama helper 抽取、`__init__.py` 缺失、watchlist.notes composite 字符串、queue.db UNIQUE 缺失、watchlist.zone CHECK 约束、CLI `asyncio.run` 开销、Windows SIGTERM、Gemma 模型名约定）。
