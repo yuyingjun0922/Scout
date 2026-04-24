@@ -26,7 +26,6 @@ from __future__ import annotations
 
 import hashlib
 import json
-import time
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
@@ -43,6 +42,7 @@ from infra.dashboard import (
     get_all_active_industries_dashboards,
 )
 from infra.db_manager import DatabaseManager
+from utils.llm_client import LLMClient, LLMResponse, OllamaClient
 from utils.time_utils import now_utc
 
 
@@ -74,10 +74,14 @@ class DirectionJudgeAgent(BaseAgent):
         retry_wait_seconds: float = 1.0,
         reports_dir: Optional[Path] = None,
         ollama_client: Any = None,
+        llm_client: Optional[LLMClient] = None,
         push_queue: Any = None,
     ):
         """
         Args:
+            ollama_client: （兼容路径）旧的 Ollama SDK 客户端 mock；测试里仍可用。
+            llm_client:    （v1.48 首选路径）直接传 LLMClient；None 则走 config.from_config()。
+                           两者都不传 → LLMClient.from_config("gemma_local") 按 config.yaml 装配。
             push_queue: 可选 PushQueue 实例；传入后 weekly_* 方法成功后自动调用
                         push_weekly_report()。None → 不推送（向后兼容 Step 9）。
         """
@@ -91,11 +95,22 @@ class DirectionJudgeAgent(BaseAgent):
         self.reports_dir = Path(reports_dir) if reports_dir else DEFAULT_REPORTS_DIR
         self.push_queue = push_queue
 
-        if ollama_client is not None:
-            self.client = ollama_client
+        # v1.48 LLM 抽象层：3 路注入
+        #   1) llm_client 直接注入 → 测试主路径
+        #   2) ollama_client 注入（旧测试接口）→ 包一个 OllamaClient
+        #   3) 都不传 → LLMClient.from_config("gemma_local")
+        if llm_client is not None:
+            self.llm: LLMClient = llm_client
+        elif ollama_client is not None:
+            self.llm = OllamaClient(
+                provider_name="gemma_local",
+                model=self.model,
+                endpoint=self.ollama_host,
+                timeout=self.timeout,
+                client_override=ollama_client,
+            )
         else:
-            import ollama
-            self.client = ollama.Client(host=ollama_host, timeout=timeout)
+            self.llm = LLMClient.from_config("gemma_local")
 
         # 启动时加载两个 prompt（缺失即爆）
         self.weekly_prompt = self._load_prompt("direction_judge_weekly")
@@ -294,9 +309,7 @@ class DirectionJudgeAgent(BaseAgent):
         """调 Gemma 生成行业分析。失败返 None（降级）+ 落 agent_errors。"""
         payload = json.dumps(dashboard, ensure_ascii=False)
         try:
-            content, tokens = self._call_gemma_text(
-                self.weekly_prompt, payload, temperature=0.3
-            )
+            resp = self._call_llm_text(self.weekly_prompt, payload, temperature=0.3)
         except DataMissingError as e:
             self._handle_gemma_failure("data", e, "weekly_industry_report")
             return None
@@ -309,10 +322,10 @@ class DirectionJudgeAgent(BaseAgent):
         self._log_llm_invocation(
             prompt_kind="weekly_industry",
             input_text=payload,
-            output_text=content,
-            tokens=tokens,
+            output_text=resp.text,
+            resp=resp,
         )
-        return content.strip()
+        return resp.text.strip()
 
     # ══════════════════════ (b) 论文周报 ══════════════════════
 
@@ -479,9 +492,7 @@ class DirectionJudgeAgent(BaseAgent):
             )
         payload = json.dumps(compact, ensure_ascii=False)
         try:
-            content, tokens = self._call_gemma_text(
-                self.paper_prompt, payload, temperature=0.3
-            )
+            resp = self._call_llm_text(self.paper_prompt, payload, temperature=0.3)
         except DataMissingError as e:
             self._handle_gemma_failure("data", e, "weekly_paper_report")
             return None
@@ -494,10 +505,10 @@ class DirectionJudgeAgent(BaseAgent):
         self._log_llm_invocation(
             prompt_kind="weekly_paper",
             input_text=payload,
-            output_text=content,
-            tokens=tokens,
+            output_text=resp.text,
+            resp=resp,
         )
-        return content.strip()
+        return resp.text.strip()
 
     # ══════════════════════ (c) 跨信号交叉验证 ══════════════════════
 
@@ -572,106 +583,36 @@ class DirectionJudgeAgent(BaseAgent):
             "rationale": rationale,
         }
 
-    # ══════════════════════ Gemma 调用（共享） ══════════════════════
+    # ══════════════════════ LLM 调用（v1.48 抽象层） ══════════════════════
 
-    def _call_gemma_text(
+    def _call_llm_text(
         self,
         system_prompt: str,
         user_content: str,
         temperature: float = 0.3,
-    ) -> Tuple[str, int]:
-        """与 Ollama chat（非 JSON 模式），返 (content, tokens)。含内部重试。"""
-        attempts = self.max_gemma_retries + 1
-        last_err: Optional[Exception] = None
-        for attempt in range(attempts):
-            try:
-                response = self.client.chat(
-                    model=self.model,
-                    messages=[
-                        {"role": "system", "content": system_prompt},
-                        {"role": "user", "content": user_content},
-                    ],
-                    options={"temperature": temperature},
-                )
-                content = self._extract_content(response)
-                if not isinstance(content, str) or not content.strip():
-                    raise ParseError(
-                        f"Gemma returned empty content: {content!r}"
-                    )
-                tokens = self._extract_tokens(response)
-                return content, tokens
-            except ParseError:
-                raise  # 模型层问题不重试
-            except Exception as e:
-                last_err = e
-                if attempt < attempts - 1:
-                    self.logger.warning(
-                        f"Gemma attempt {attempt + 1}/{attempts} failed: "
-                        f"{type(e).__name__}: {e}"
-                    )
-                    time.sleep(self.retry_wait_seconds)
-                    continue
-                break
-
-        err_msg = f"{type(last_err).__name__}: {last_err}"
-        if self._is_connection_error(last_err):
-            raise DataMissingError(
-                f"Gemma unreachable after {attempts} attempts: {err_msg}"
-            )
-        raise LLMError(
-            f"Gemma call failed after {attempts} attempts: {err_msg}"
+    ) -> LLMResponse:
+        """薄代理 —— 委托给 self.llm.chat（非 JSON 模式）。
+        raises DataMissingError / LLMError / ParseError（与旧 _call_gemma_text 完全对齐）。
+        """
+        return self.llm.chat(
+            system_prompt,
+            user_content,
+            temperature=temperature,
+            response_format="text",
+            max_retries=self.max_gemma_retries,
+            retry_wait_seconds=self.retry_wait_seconds,
         )
-
-    @staticmethod
-    def _extract_content(response: Any) -> str:
-        if isinstance(response, dict):
-            msg = response.get("message") or {}
-            if isinstance(msg, dict):
-                content = msg.get("content")
-                if isinstance(content, str):
-                    return content
-        msg = getattr(response, "message", None)
-        if msg is not None:
-            content = getattr(msg, "content", None)
-            if isinstance(content, str):
-                return content
-        raise ParseError(
-            f"Ollama response missing .message.content: {str(response)[:300]!r}"
-        )
-
-    @staticmethod
-    def _extract_tokens(response: Any) -> int:
-        if isinstance(response, dict):
-            p = int(response.get("prompt_eval_count") or 0)
-            e = int(response.get("eval_count") or 0)
-        else:
-            p = int(getattr(response, "prompt_eval_count", 0) or 0)
-            e = int(getattr(response, "eval_count", 0) or 0)
-        return p + e
-
-    @staticmethod
-    def _is_connection_error(err: Optional[Exception]) -> bool:
-        if err is None:
-            return False
-        if isinstance(err, (ConnectionError, TimeoutError)):
-            return True
-        low = str(err).lower()
-        for kw in (
-            "connect", "refused", "unreachable",
-            "timed out", "timeout", "econnrefused",
-        ):
-            if kw in low:
-                return True
-        return False
 
     def _log_llm_invocation(
         self,
         prompt_kind: str,
         input_text: str,
         output_text: str,
-        tokens: int,
+        resp: LLMResponse,
     ) -> None:
-        """写 llm_invocations。失败不上抛。"""
+        """写 llm_invocations，同时填旧字段（tokens_used/cost_cents）与
+        v1.48 新字段（input_tokens / output_tokens / cost_usd_cents / latency_ms /
+        provider / fallback_used）。失败不上抛。"""
         try:
             input_hash = hashlib.sha256(
                 input_text[:500].encode("utf-8")
@@ -680,17 +621,25 @@ class DirectionJudgeAgent(BaseAgent):
             self.db.write(
                 """INSERT INTO llm_invocations
                    (agent_name, prompt_version, model_name, input_hash,
-                    output_summary, tokens_used, cost_cents, invoked_at)
-                   VALUES (?, ?, ?, ?, ?, ?, ?, ?)""",
+                    output_summary, tokens_used, cost_cents, invoked_at,
+                    input_tokens, output_tokens, cost_usd_cents,
+                    latency_ms, provider, fallback_used)
+                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
                 (
                     self.name,
                     f"direction_judge_{prompt_kind}_{self.prompt_version}",
-                    self.model,
+                    resp.model_name,
                     input_hash,
                     output_summary,
-                    int(tokens),
-                    0,  # Gemma local → free
+                    int(resp.tokens_used),
+                    int(round(resp.cost_usd_cents)),
                     now_utc(),
+                    int(resp.input_tokens),
+                    int(resp.output_tokens),
+                    float(resp.cost_usd_cents),
+                    int(resp.latency_ms),
+                    resp.provider,
+                    resp.fallback_used,
                 ),
             )
         except Exception as log_err:

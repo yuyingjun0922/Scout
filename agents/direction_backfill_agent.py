@@ -23,7 +23,6 @@ import hashlib
 import json
 import sqlite3
 import sys
-import time
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
@@ -40,6 +39,7 @@ from agents.base import (
     ParseError,
 )
 from infra.db_manager import DatabaseManager
+from utils.llm_client import LLMClient, LLMResponse, OllamaClient
 from utils.time_utils import now_utc
 
 
@@ -73,6 +73,7 @@ class DirectionBackfillAgent(BaseAgent):
         max_gemma_retries: int = 1,
         retry_wait_seconds: float = 1.0,
         ollama_client: Any = None,
+        llm_client: Optional[LLMClient] = None,
         prompt_version: str = PROMPT_VERSION,
     ):
         super().__init__(name="direction_backfill", db=db)
@@ -83,11 +84,19 @@ class DirectionBackfillAgent(BaseAgent):
         self.retry_wait_seconds = retry_wait_seconds
         self.prompt_version = prompt_version
 
-        if ollama_client is not None:
-            self.client = ollama_client
+        # v1.48 LLM 抽象层：3 路注入（见 direction_judge.__init__ 注释）
+        if llm_client is not None:
+            self.llm: LLMClient = llm_client
+        elif ollama_client is not None:
+            self.llm = OllamaClient(
+                provider_name="gemma_local",
+                model=self.model,
+                endpoint=self.ollama_host,
+                timeout=self.timeout,
+                client_override=ollama_client,
+            )
         else:
-            import ollama
-            self.client = ollama.Client(host=ollama_host, timeout=timeout)
+            self.llm = LLMClient.from_config("gemma_local")
 
     # ── 主入口 ──
 
@@ -173,13 +182,25 @@ class DirectionBackfillAgent(BaseAgent):
         title, body = self._extract_title_body(content)
         user_prompt = self._build_user_prompt(title, body)
 
-        parsed, tokens = self._call_gemma(user_prompt)
+        resp = self._call_llm_json(user_prompt)
+        try:
+            parsed = json.loads(resp.text)
+        except json.JSONDecodeError as je:
+            raise ParseError(
+                f"Gemma returned non-JSON: {resp.text[:300]!r}"
+            ) from je
+        if not isinstance(parsed, dict):
+            raise ParseError(
+                f"Gemma JSON must be object, got {type(parsed).__name__}: "
+                f"{resp.text[:300]!r}"
+            )
+
         direction = (parsed.get("direction") or "").strip().lower()
 
         self._log_llm_invocation(
             input_text=user_prompt,
             output=direction or "<empty>",
-            tokens=tokens,
+            resp=resp,
         )
 
         if direction not in VALID_DIRECTIONS:
@@ -215,99 +236,20 @@ class DirectionBackfillAgent(BaseAgent):
             "请判断方向。"
         )
 
-    # ── Gemma 调用（与 SignalCollectorAgent 模式一致）──
+    # ── LLM 调用（v1.48 抽象层） ──
 
-    def _call_gemma(self, user_content: str) -> Tuple[Dict[str, Any], int]:
-        attempts = self.max_gemma_retries + 1
-        last_err: Optional[Exception] = None
-        for attempt in range(attempts):
-            try:
-                response = self.client.chat(
-                    model=self.model,
-                    messages=[
-                        {"role": "system", "content": SYSTEM_PROMPT},
-                        {"role": "user", "content": user_content},
-                    ],
-                    format="json",
-                    options={"temperature": 0.1},
-                )
-                content = self._extract_content(response)
-                try:
-                    parsed = json.loads(content)
-                except json.JSONDecodeError as je:
-                    raise ParseError(
-                        f"Gemma returned non-JSON: {content[:300]!r}"
-                    ) from je
-                if not isinstance(parsed, dict):
-                    raise ParseError(
-                        f"Gemma JSON must be object, got "
-                        f"{type(parsed).__name__}: {content[:300]!r}"
-                    )
-                tokens = self._extract_tokens(response)
-                return parsed, tokens
-            except ParseError:
-                raise
-            except Exception as e:
-                last_err = e
-                if attempt < attempts - 1:
-                    self.logger.warning(
-                        f"Gemma attempt {attempt + 1}/{attempts} failed: "
-                        f"{type(e).__name__}: {e}"
-                    )
-                    time.sleep(self.retry_wait_seconds)
-                    continue
-                break
-
-        err_msg = f"{type(last_err).__name__}: {last_err}"
-        if self._is_connection_error(last_err):
-            raise DataMissingError(
-                f"Gemma unreachable after {attempts} attempts: {err_msg}"
-            )
-        raise LLMError(
-            f"Gemma call failed after {attempts} attempts: {err_msg}"
+    def _call_llm_json(self, user_content: str) -> LLMResponse:
+        """薄代理 —— 委托给 self.llm.chat（JSON 模式）。
+        raises DataMissingError / LLMError / ParseError（与旧 _call_gemma 完全对齐）。
+        """
+        return self.llm.chat(
+            SYSTEM_PROMPT,
+            user_content,
+            temperature=0.1,
+            response_format="json",
+            max_retries=self.max_gemma_retries,
+            retry_wait_seconds=self.retry_wait_seconds,
         )
-
-    @staticmethod
-    def _extract_content(response: Any) -> str:
-        if isinstance(response, dict):
-            msg = response.get("message") or {}
-            if isinstance(msg, dict):
-                content = msg.get("content")
-                if isinstance(content, str):
-                    return content
-        msg = getattr(response, "message", None)
-        if msg is not None:
-            content = getattr(msg, "content", None)
-            if isinstance(content, str):
-                return content
-        raise ParseError(
-            f"Ollama response missing .message.content: {str(response)[:300]!r}"
-        )
-
-    @staticmethod
-    def _extract_tokens(response: Any) -> int:
-        if isinstance(response, dict):
-            p = int(response.get("prompt_eval_count") or 0)
-            e = int(response.get("eval_count") or 0)
-        else:
-            p = int(getattr(response, "prompt_eval_count", 0) or 0)
-            e = int(getattr(response, "eval_count", 0) or 0)
-        return p + e
-
-    @staticmethod
-    def _is_connection_error(err: Optional[Exception]) -> bool:
-        if err is None:
-            return False
-        if isinstance(err, (ConnectionError, TimeoutError)):
-            return True
-        low = str(err).lower()
-        for kw in (
-            "connect", "refused", "unreachable",
-            "timed out", "timeout", "econnrefused",
-        ):
-            if kw in low:
-                return True
-        return False
 
     # ── 持久化 ──
 
@@ -324,8 +266,9 @@ class DirectionBackfillAgent(BaseAgent):
         self,
         input_text: str,
         output: str,
-        tokens: int,
+        resp: LLMResponse,
     ) -> None:
+        """v1.48 —— 同时填旧字段与新字段（见 direction_judge._log_llm_invocation）。"""
         try:
             input_hash = hashlib.sha256(
                 input_text.encode("utf-8")
@@ -333,17 +276,25 @@ class DirectionBackfillAgent(BaseAgent):
             self.db.write(
                 """INSERT INTO llm_invocations
                    (agent_name, prompt_version, model_name, input_hash,
-                    output_summary, tokens_used, cost_cents, invoked_at)
-                   VALUES (?, ?, ?, ?, ?, ?, ?, ?)""",
+                    output_summary, tokens_used, cost_cents, invoked_at,
+                    input_tokens, output_tokens, cost_usd_cents,
+                    latency_ms, provider, fallback_used)
+                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
                 (
                     self.name,
                     self.prompt_version,
-                    self.model,
+                    resp.model_name,
                     input_hash,
                     output[:200],
-                    tokens,
-                    0,
+                    int(resp.tokens_used),
+                    int(round(resp.cost_usd_cents)),
                     now_utc(),
+                    int(resp.input_tokens),
+                    int(resp.output_tokens),
+                    float(resp.cost_usd_cents),
+                    int(resp.latency_ms),
+                    resp.provider,
+                    resp.fallback_used,
                 ),
             )
         except sqlite3.Error as e:

@@ -1,13 +1,14 @@
 # Scout Phase 1 config.yaml
-# 对应系统蓝图 v1.66。时间字段存储永远 UTC；显示用 KST。
+# 对应系统蓝图 v1.66 / v1.48 LLM 抽象层。时间字段存储永远 UTC；显示用 KST。
 
-# ═══ LLM ═══
+# ═══ LLM（预算 + 默认模型占位）═══
+# v1.48 后真正的调用走 llm_providers（下面）；本节只保留全局预算控制。
 llm:
-  local_model: gemma4:e4b                # Ollama 官方 tag 格式；Gemma 3 (4B effective/e4b)；本地零成本
-  cloud_model: claude-sonnet-4-6         # 当前 Anthropic Sonnet 最新；Phase 1 占位，有 API key 后生效
+  local_model: gemma4:e4b                # 兼容字段；新代码读 llm_providers.gemma_local.model
+  cloud_model: claude-sonnet-4-6         # 兼容字段；未来 Sonnet 启用时配 llm_providers.claude_sonnet
 
   phase1_mode: gemma_only                # gemma_only / hybrid / cloud_only
-  api_key_required: false                # Phase 1 不强制 API key；cloud_model 占位
+  api_key_required: false                # Phase 1 不强制 API key
 
   # v1.66 USD 预算（稳态期准则；Phase 1 不生效但预写）
   daily_llm_cost_usd_running: 1          # v1.65 稳态日预算
@@ -18,6 +19,51 @@ llm:
   # 原 doc KRW 字段（保留兼容）
   daily_cost_limit_krw: 4500
   monthly_cost_limit_krw: 60000
+
+# ═══ LLM Providers（v1.48 抽象层）═══
+# "能力需求绑定，不绑定模型" —— 每个 Agent 在 agents.* 下声明它用哪个 provider。
+# 切换模型只改这里，不改代码。
+# type 枚举：ollama / deepseek / anthropic / openai
+# Phase A 只实装 ollama；其它 type 会抛 NotImplementedError。
+llm_providers:
+  gemma_local:
+    type: ollama
+    endpoint: http://localhost:11434
+    model: gemma4:e4b
+    max_tokens: 2048
+    temperature: 0.1
+    timeout: 30
+    fallback: null                       # 本地模型无 fallback
+
+  # 以下为 Phase B/C 占位 —— 配置已在但 type 实装缺席；改 agents.*.llm 指过来才会被装配
+  # deepseek_v3:
+  #   type: deepseek
+  #   endpoint: https://api.deepseek.com
+  #   model: deepseek-chat
+  #   api_key_env: DEEPSEEK_API_KEY
+  #   max_tokens: 4096
+  #   temperature: 0.1
+  #   timeout: 60
+  #   fallback: gemma_local
+  #
+  # claude_sonnet:
+  #   type: anthropic
+  #   model: claude-sonnet-4-6
+  #   api_key_env: ANTHROPIC_API_KEY
+  #   max_tokens: 4096
+  #   temperature: 0.1
+  #   timeout: 60
+  #   fallback: gemma_local
+
+# ═══ Agents（v1.48 能力→provider 映射）═══
+# 每个 Agent 声明用哪个 provider（key 指向 llm_providers.*）。
+# 未列出的 Agent 走各自代码里写的默认（Phase A 只有 direction_judge / direction_backfill
+# 真正读这里；其它 Agent 留给 Phase B 逐个迁移）。
+agents:
+  direction_judge:
+    llm: gemma_local
+  direction_backfill:
+    llm: gemma_local
 
 # ═══ 信源（Phase 1 5 个核心）═══
 sources:

@@ -101,6 +101,33 @@ class TestingConfig(BaseModel):
     fixture_dir: str = Field(..., min_length=1)
 
 
+class LLMProviderConfig(BaseModel):
+    """v1.48 LLM 抽象层 —— 单个 provider 配置。
+
+    agents.<name>.llm 字段指向这里的 key，LLMClient.from_config() 按名装配。
+    type=ollama 在 Phase A 实装；deepseek/anthropic/openai 骨架留 Phase B/C。
+    """
+
+    model_config = ConfigDict(extra='forbid')
+
+    type: Literal['ollama', 'deepseek', 'anthropic', 'openai']
+    model: str = Field(..., min_length=1)
+    endpoint: Optional[str] = None
+    api_key_env: Optional[str] = None
+    max_tokens: int = Field(2048, ge=1)
+    temperature: float = Field(0.1, ge=0.0, le=2.0)
+    timeout: float = Field(30.0, gt=0)
+    fallback: Optional[str] = None              # 另一 provider 的 key
+
+
+class AgentLLMBinding(BaseModel):
+    """v1.48 —— 单个 Agent 对 LLM provider 的绑定。"""
+
+    model_config = ConfigDict(extra='forbid')
+
+    llm: str = Field(..., min_length=1)          # llm_providers 的 key
+
+
 class QQPushConfig(BaseModel):
     """v1.13 Phase 2A — QQ 开放平台 C2C 主动推送配置（可选）。
 
@@ -137,6 +164,10 @@ class ScoutConfig(BaseModel):
     mode: Literal['cold_start', 'running', 'diagnosis']
     qq_push: Optional[QQPushConfig] = None
 
+    # v1.48 LLM 抽象层 —— llm_providers 为可选以保留向后兼容（旧 config.yaml 仍可读）
+    llm_providers: Dict[str, LLMProviderConfig] = Field(default_factory=dict)
+    agents: Dict[str, AgentLLMBinding] = Field(default_factory=dict)
+
     @model_validator(mode='after')
     def _check_phase1_sources(self) -> 'ScoutConfig':
         """Phase 1 必须配齐 D1/D4/V1/V3/S4 这 5 个核心信源"""
@@ -146,6 +177,24 @@ class ScoutConfig(BaseModel):
                 f"Phase 1 requires sources {sorted(PHASE1_REQUIRED_SOURCES)}, "
                 f"missing: {sorted(missing)}"
             )
+        return self
+
+    @model_validator(mode='after')
+    def _check_agent_llm_refs(self) -> 'ScoutConfig':
+        """agents.<name>.llm 必须指向 llm_providers.* 存在的 key；fallback 同理。"""
+        provider_names = set(self.llm_providers.keys())
+        for agent_name, binding in self.agents.items():
+            if binding.llm not in provider_names:
+                raise ValueError(
+                    f"agents.{agent_name}.llm={binding.llm!r} not in llm_providers; "
+                    f"available: {sorted(provider_names)}"
+                )
+        for pname, pcfg in self.llm_providers.items():
+            if pcfg.fallback and pcfg.fallback not in provider_names:
+                raise ValueError(
+                    f"llm_providers.{pname}.fallback={pcfg.fallback!r} "
+                    f"not in llm_providers; available: {sorted(provider_names)}"
+                )
         return self
 
 

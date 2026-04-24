@@ -295,17 +295,25 @@ CREATE TABLE IF NOT EXISTS global_companies (
 CREATE INDEX IF NOT EXISTS idx_gc_name ON global_companies(company_name);
 
 
--- 14. LLM调用记录（v1.57）
+-- 14. LLM调用记录（v1.57 创建 / v1.48 LLM 抽象层扩展字段）
+-- 旧字段 tokens_used / cost_cents 保留做向后兼容；新 writer 同时写新旧字段。
 CREATE TABLE IF NOT EXISTS llm_invocations (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     agent_name TEXT,
     prompt_version TEXT,                    -- direction_judge_v001
-    model_name TEXT,                        -- claude-opus-4-7
+    model_name TEXT,                        -- gemma4:e4b / deepseek-chat / ...
     input_hash TEXT,
     output_summary TEXT,
-    tokens_used INTEGER,
-    cost_cents INTEGER,
-    invoked_at TEXT                         -- UTC
+    tokens_used INTEGER,                    -- v1.48 后 = input_tokens + output_tokens
+    cost_cents INTEGER,                     -- 兼容字段；新写入同时填 cost_usd_cents (REAL)
+    invoked_at TEXT,                        -- UTC
+    -- ── v1.48 新增 ──
+    input_tokens INTEGER,                   -- prompt tokens
+    output_tokens INTEGER,                  -- completion tokens
+    cost_usd_cents REAL,                    -- USD 分（浮点，支持小数分）
+    latency_ms INTEGER,                     -- 单次调用墙钟耗时
+    provider TEXT,                          -- llm_providers key（gemma_local / deepseek_v3 / ...）
+    fallback_used TEXT                      -- 若降级，记录原 primary 名；否则 NULL
 );
 CREATE INDEX IF NOT EXISTS idx_llm_agent_time ON llm_invocations(agent_name, invoked_at);
 

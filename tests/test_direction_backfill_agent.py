@@ -297,7 +297,9 @@ class TestProcessOne:
         assert valid is True
 
 
-# ═══════════════════ _call_gemma 错误分类 ═══════════════════
+# ═══════════════════ LLM 调用错误分类（v1.48 抽象层路径）═══════════════════
+# v1.48 后 _call_gemma 被拆成 _call_llm_json（连接/LLM 错由 LLMClient 抛）+
+# _process_one 里的 JSON 解析（ParseError 由 json.loads 抛）。
 
 
 class TestCallGemmaErrors:
@@ -305,31 +307,31 @@ class TestCallGemmaErrors:
         ollama = FakeOllama(raise_on_call=ConnectionError("Connection refused"))
         agent = _make_agent(tmp_db, ollama=ollama, max_gemma_retries=0)
         with pytest.raises(DataMissingError):
-            agent._call_gemma("hi")
+            agent._call_llm_json("hi")
 
     def test_timeout_data_missing(self, tmp_db):
         ollama = FakeOllama(raise_on_call=TimeoutError("timed out"))
         agent = _make_agent(tmp_db, ollama=ollama, max_gemma_retries=0)
         with pytest.raises(DataMissingError):
-            agent._call_gemma("hi")
+            agent._call_llm_json("hi")
 
     def test_generic_exception_llm_error(self, tmp_db):
         ollama = FakeOllama(raise_on_call=RuntimeError("rate limited"))
         agent = _make_agent(tmp_db, ollama=ollama, max_gemma_retries=0)
         with pytest.raises(LLMError):
-            agent._call_gemma("hi")
+            agent._call_llm_json("hi")
 
     def test_malformed_json_parse_error(self, tmp_db):
         ollama = FakeOllama(raw_content="not json at all")
         agent = _make_agent(tmp_db, ollama=ollama, max_gemma_retries=0)
         with pytest.raises(ParseError):
-            agent._call_gemma("hi")
+            agent._process_one("u1", "content")
 
     def test_non_object_json_parse_error(self, tmp_db):
         ollama = FakeOllama(raw_content="[1, 2, 3]")
         agent = _make_agent(tmp_db, ollama=ollama, max_gemma_retries=0)
         with pytest.raises(ParseError):
-            agent._call_gemma("hi")
+            agent._process_one("u1", "content")
 
     def test_retry_then_success(self, tmp_db):
         ollama = FakeOllama(sequence=[
@@ -337,8 +339,8 @@ class TestCallGemmaErrors:
             {"direction": "neutral"},
         ])
         agent = _make_agent(tmp_db, ollama=ollama, max_gemma_retries=1)
-        parsed, tokens = agent._call_gemma("hi")
-        assert parsed == {"direction": "neutral"}
+        resp = agent._call_llm_json("hi")
+        assert json.loads(resp.text) == {"direction": "neutral"}
 
 
 # ═══════════════════ batch run ═══════════════════
