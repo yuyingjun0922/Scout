@@ -249,6 +249,55 @@ Watchdog PowerShell 脚本在写 state 时对 `ollama` 走 list append 分支，
 
 ---
 
+## TD-008 · user_decisions v1.69 新字段暂时全 NULL（待 QQ receive_reply 上线后接线）
+
+- **优先级**：🟡 中（不影响现有推荐管线，阻塞复盘闭环深度）
+- **发现日期**：2026-04-24
+- **归属模块**：`agents/recommendation_agent.py` / `agents/push_consumer_agent.py` / 未来的 QQ receive_reply 插件
+- **状态**：schema 已加，writer 待接（QQ 插件 4/8 上线后）
+
+### 背景
+
+2026-04-24 对 `user_decisions` 表加了 v1.69 决策字段扩展（ALTER TABLE × 5）：
+- `reasoning TEXT` — 用户决策时的思考文字
+- `emotion TEXT` — confident/hesitant/fomo/fear/anchoring/contrarian
+- `confidence INTEGER` — 1-10 自评信心
+- `time_spent_seconds INTEGER` — 决策花费秒数
+- `pre_mortem TEXT` — JSON: 3 个失败场景
+
+migration: `scripts/migrations/2026-04-24_user_decisions_v169_fields.py`
+backup: `data/backups/knowledge.db.pre_v169_fields_20260424_*`
+
+### 现状
+
+- 5 字段在 schema 上可用，全部 NULL-able
+- **没有 writer 代码会填这 5 字段**，新 row 进来时全部 NULL
+- 原有字段 (recommend_id / stock / decision / decision_reason / decided_at) 也还没 INSERT 源 — user_decisions 表目前 0 行，整个"推荐→用户决策→复盘"闭环还没跑通
+
+### 修复方案（按 QQ 插件施工顺序）
+
+**阶段 1**（Phase 2B QQ 插件工具 4/8 = `qqbot-channel.receive_reply`）：
+- 用户在 QQ 收到推荐后回复：`track 688082 confident 8 "理由..."` 格式（或自由格式 + LLM 解析）
+- PushConsumerAgent 增加 `on_user_reply` handler，解析 reply → INSERT user_decisions（含 5 新字段）
+- `time_spent_seconds` = 推荐推送时间到用户回复时间的差（push_queue.delivered_at − 用户 reply 时间）
+
+**阶段 2**（Phase 3 complement）：
+- `pre_mortem` JSON 格式由 master_analysis agent 在推荐当时生成 3 个失败场景，随推荐一起推给用户
+- 用户回复时可选"confirm/adjust/add"pre_mortem 条目
+
+### 预期工作量
+
+- QQ `receive_reply` 工具本身：0.5~1 天（Phase 2B 范围内）
+- INSERT writer + parser：0.5 天
+- pre_mortem 生成（Phase 3）：单算
+
+### 验证
+
+- QQ 回复触发 INSERT user_decisions，5 新字段非 NULL
+- 复盘 agent（`review_agent`，Phase 3）能跨 user_decisions + recommendations 做 emotion/confidence/pre_mortem 三维归因
+
+---
+
 ## TD-001（历史：Ollama helper 代码重复等）
 
 > 见 [CLAUDE.md §5 重要技术债务](../CLAUDE.md) 原清单（Ollama helper 抽取、`__init__.py` 缺失、watchlist.notes composite 字符串、queue.db UNIQUE 缺失、watchlist.zone CHECK 约束、CLI `asyncio.run` 开销、Windows SIGTERM、Gemma 模型名约定）。

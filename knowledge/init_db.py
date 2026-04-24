@@ -342,7 +342,7 @@ CREATE INDEX IF NOT EXISTS idx_rec_stock ON recommendations(stock);
 CREATE INDEX IF NOT EXISTS idx_rec_mode ON recommendations(mode);
 
 
--- 17. 用户决策记录（v1.61 推荐→复盘闭环）
+-- 17. 用户决策记录（v1.61 推荐→复盘闭环；v1.69 扩展 5 字段，见 TD-008）
 CREATE TABLE IF NOT EXISTS user_decisions (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     recommend_id INTEGER,
@@ -350,6 +350,11 @@ CREATE TABLE IF NOT EXISTS user_decisions (
     decision TEXT,                          -- track/reject/auto_track
     decision_reason TEXT,
     decided_at TEXT,                        -- UTC
+    reasoning TEXT,                         -- v1.69 用户决策时的思考文字
+    emotion TEXT,                           -- v1.69 confident/hesitant/fomo/fear/anchoring/contrarian
+    confidence INTEGER,                     -- v1.69 1-10 用户自评信心
+    time_spent_seconds INTEGER,             -- v1.69 决策花费秒数
+    pre_mortem TEXT,                        -- v1.69 JSON: 3 个失败场景
     FOREIGN KEY (recommend_id) REFERENCES recommendations(id)
 );
 CREATE INDEX IF NOT EXISTS idx_ud_recommend ON user_decisions(recommend_id);
