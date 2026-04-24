@@ -18,7 +18,7 @@ from typing import Any, Dict, List, Optional, Tuple
 
 import yaml
 
-logger = logging.getLogger(__name__)
+logger = logging.getLogger("scout.suppress")  # 挂 scout tree, 继承 scout.log 的 file handler
 
 _CONFIG_PATH = Path(__file__).parent.parent / "config" / "suppressions.yaml"
 _CACHE_TTL_SECONDS = 30
