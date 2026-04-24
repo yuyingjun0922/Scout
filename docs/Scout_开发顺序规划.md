@@ -22,7 +22,7 @@
 | 版本 | 交付 | 测试增量 | 完成日期 |
 |---|---|---|---|
 | v1.01 | FinancialAgent（Z''-Score 1995）+ MasterAgent | +95 | 2026-04-05 |
-| v1.07 | RecommendationAgent（规则 + Sonnet LLM，A/B/candidate/reject） | +72 | 2026-04-10 |
+| v1.07 | RecommendationAgent（纯规则层 6 维度评分，A≥75/B 60-74/candidate 40-59/reject<40）。Stage 2 Sonnet 层设计中未实装 — 见 [TD-009](Scout_技术债务清单.md#td-009) | +72 | 2026-04-10 |
 | v1.08 | MotivationDriftAgent（180 天周期） | +38 | 2026-04-12 |
 | v1.10 | DirectionBackfillAgent | +21 | 2026-04-14 |
 | v1.11 | V3 Playwright 激活 | +29 | 2026-04-16 |
