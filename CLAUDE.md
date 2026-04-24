@@ -156,6 +156,33 @@ class MyAgent(BaseAgent):
 
 Phase 1 未启用 PR 流程；单人开发。如启用：每步一 commit，附 pytest 通过数 + 新增/修改文件清单。
 
+### 8.5 代码变更后的重启判断
+
+每次 commit/merge 到 main 后，报告里**必须明确标注**：
+
+> "本次改动是否需要重启 scout serve"
+
+判断规则：
+
+| 改动类型 | 是否需要重启 |
+|---|---|
+| SQL migration (ADD COLUMN 等 metadata-only) | 否 |
+| config.yaml — 有 TTL cache 的配置（如 suppressions） | 否 |
+| config.yaml — schedule / llm / sources 等启动期读取的配置 | 是 |
+| Agent 的 `_process` 逻辑修改 | 是 |
+| `prompts/` 里的 prompt 文件修改 | 看代码是否每次调用重读；不确定就重启 |
+| 新增 Agent / 新增 MCP 工具 | 是 |
+| `utils/` 下纯函数库修改 | 是（除非已实现热重载，如 `utils/suppress.py`） |
+
+**报告格式示例**：
+
+> ✅ 合并到 main (`xxx` hash)。本次改动：ADD COLUMN × 5 + migration 脚本 + init_db 同步。
+> **重启需求**：否（SQLite metadata-only）。scout serve PID xxxxx 可继续运行。
+
+**如果有任何疑问，默认"是"** — 重启成本低（30 秒），漏重启的代价可能是几天静默失败（参见 [TD-002 的教训](docs/Scout_技术债务清单.md#td-002)：`SUPPRESSED_ERRORS` 模块级常量固化在进程启动时，代码改了不重启不生效，持续 5 天）。
+
+**理由**（记录在 commit message 或报告里）：Scout serve 是长跑进程，代码 merge 主动权在人（你/Claude Code），但重启主动权也在人。**没有**"自动检测代码变更重启"机制（蓄意不做 — 违反 D-018 运维纪律：Watchdog 只对进程存活负责，不对代码新鲜度负责）。所以每次报告必须让人能立刻判断"是否要动那颗红色按钮（`scout.bat` 重启）"。
+
 ---
 
 ## 9. 运行命令速查
