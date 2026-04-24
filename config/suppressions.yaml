@@ -1,0 +1,17 @@
+# 告警抑制规则 v1.16 — TD-002 从 module-level 常量外化
+# 修改后 30s 内自动生效（不用重启 scout serve）
+# 对齐 P1 异常可见性: scout 启动时会打印当前加载规则到 scout.log
+
+suppressions:
+  - agent_name: akshare_s4
+    pattern: RemoteDisconnected
+    reason: 东财服务端拒绝 akshare 默认 UA，确定性拒连；P2 新浪 fallback 待做
+    # KST 23:59:59 对齐用户直觉（用户离家 5 天期间 v1.15 原值是 KST 00:00 失效早了 1 天）
+    until: '2026-05-01T23:59:59+09:00'
+    tracking: TD-003
+
+  - agent_name: akshare_s4
+    pattern: ConnectionError
+    reason: 同上，兜底 ConnectionError 变体
+    until: '2026-05-01T23:59:59+09:00'
+    tracking: TD-003
