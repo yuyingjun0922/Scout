@@ -144,3 +144,27 @@ top 重复：002230=8 / 688082=8 / 002371=7 / 688012=7 / 688256=7。
 注意：其中 4 个（半导体材料/新材料/生物制造/低空经济）在 `industry_dict` 表里**有** sub_industries 数据（见 [TD-013](Scout_技术债务清单.md#td-013--industry_dict-表与-watchlist-数据孤岛--字段功能重复)），但 watchlist 与 industry_dict 数据孤岛导致 RecommendationAgent 看不到。
 处理：待决策（保留 / 移除 / 补完字段），今天不做。
 来源：2026-04-25 [scripts/watchlist_field_audit.py](../scripts/watchlist_field_audit.py) 报告
+
+### 6. 4 个行业补字段顺序决策 (2026-04-25)
+
+继半导体设备 (commit `6c6205b`) 之后,以下 4 个行业应陆续补 watchlist 5 字段
+(`gap_fillability` + `gap_analysis` + `thesis` + `kill_conditions` + `motivation_detail`)。
+
+**顺序**:
+
+1. **半导体材料** (id=17) — Core 4 姐妹行业,动机 + 缺口 + 三市场逻辑对齐半导体设备
+   - 注: 当前 12 推荐里 10 reject (Stage 1 触发, Z-Score<1.81),
+         补字段不会改变 reject 状态,但会让评分基于真实数据
+2. **新材料** (id=18) — 18 全 candidate, 补完最可能升 B
+3. **生物制造** (id=19) — 24 全 candidate
+4. **低空经济** (id=20) — 18 全 candidate
+
+**实施约束**: 每次补 1 个行业,实战数据查证 + dry-run + apply,**不批量做**。
+**优先级**: 不阻塞任何 Phase 任务,在用户精力充沛时逐个做。
+
+**样板**:
+- [scripts/update_semi_eq_5fields.py](../scripts/update_semi_eq_5fields.py)
+- [docs/Scout_操作手册.md](Scout_操作手册.md) "gap_fillability 填写惯例"
+- 半导体设备 commit `6c6205b` 的写入流程 (备份 → dry-run → apply → SELECT 验证 → cmd_recommend 重评分)
+
+**独角兽曝光 (id=23) 不在本顺序** — 性质不同 (US mega-cap watch-only, 0 推荐), 下个独立任务处理。

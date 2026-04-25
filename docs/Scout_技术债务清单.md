@@ -739,6 +739,87 @@ Top 重复股票（最多 8 次）：
 
 ---
 
+## TD-018a · watchlist.entered_at 5 行 NULL (migration 漏设)
+
+- **优先级**：🟢 低
+- **类型**：数据完整性
+- **发现日期**：2026-04-25（调查 5 个"僵尸"行业时发现）
+- **修复时机**：顺手补即可，不阻塞
+- **状态**：未修
+
+### 现状
+
+v1.02 / v1.06 migration 把行业加进 `watchlist` 时，没设 `entered_at`。影响 5 个行业（半导体材料 / 新材料 / 生物制造 / 低空经济 / 独角兽曝光）`entered_at = NULL`。
+
+### 影响
+
+- "行业加入时间"信息丢失（虽然能从 `git log scripts/migrate_v102_industry_refresh.py` 反推 migration 日期 = 2026-04-18）
+- 未来如果做"行业生命周期分析"（从 entered → first_signal → first_recommendation），数据缺失
+
+### 修复方案
+
+一次性 UPDATE 把这 5 行 `entered_at` 补上 migration 日期：
+
+```sql
+UPDATE watchlist SET entered_at = '2026-04-18T00:00:00+00:00'
+WHERE industry_name IN ('半导体材料','新材料','生物制造','低空经济','独角兽曝光')
+  AND entered_at IS NULL;
+```
+
+### 工作量
+
+10 分钟（含备份 + dry-run + verify）
+
+### 不立即修理由
+
+不阻塞任何功能，顺手补即可。
+
+---
+
+## TD-018b · info_industry_map 表空，d4 用绕过逻辑
+
+- **优先级**：🟡 中
+- **类型**：架构问题（与 TD-013 同类）
+- **发现日期**：2026-04-25
+- **修复时机**：Phase 2A（5 月，与 TD-013 一起做架构决策）
+- **状态**：未启动
+
+### 现状
+
+`knowledge.db` 有 `info_industry_map` 表（info_units 与 watchlist 的 FK join table），**但全表空**。`d4` 维度评分用 `info_units.related_industries LIKE '%name%'` **绕过这张表**（[agents/recommendation_agent.py:_d4_data_verification](agents/recommendation_agent.py)）。
+
+实证（2026-04-25）：
+- 半导体设备 d4 SQL 实测 90 天 16 条信号（走 LIKE 路径）
+- `info_industry_map` 全表 0 行
+- 5 个"僵尸"行业 + 半导体设备 + HBM 通过 `info_industry_map` 查 90 天信号都是 0
+
+### 含义（待决定）
+
+(a) `info_industry_map` 是设计意图被弃用 → 应明确废弃并清理代码
+(b) Agents 应该维护但漏写 → 应补维护逻辑
+(c) 设计冗余 → 决定保留哪个（FK join 性能更好，但 LIKE 简单直接）
+
+**与 [TD-013](#td-013--industry_dict-表与-watchlist-数据孤岛--字段功能重复) 是同类问题**：蓝图设计了双轨，代码用脚投票选了一轨。
+
+### 修复方案（待评估）
+
+| 方案 | 描述 | 优势 | 劣势 |
+|---|---|---|---|
+| **A** | 废弃 `info_industry_map` 表（DROP） | 最干净 | 不可回退 |
+| **B** | 在 info_units 写入时同步维护 `info_industry_map`（改 agents） | 保留 FK join 路径 | 写入路径变复杂 |
+| **C** | 建 view 让两种查询透明 | 不动 schema | 仍是空表，治标不治本 |
+
+### 工作量
+
+1-2 小时（取决于选哪个方案）
+
+### 详见
+
+- TD-013（industry_dict 数据孤岛，同期决策）
+- 实证: 2026-04-25 调查 5 僵尸行业（docs/Scout_当前进度.md §5.5/§5.6）
+
+---
+
 ## TD-001（历史：Ollama helper 代码重复等）
 
 > 见 [CLAUDE.md §5 重要技术债务](../CLAUDE.md) 原清单（Ollama helper 抽取、`__init__.py` 缺失、watchlist.notes composite 字符串、queue.db UNIQUE 缺失、watchlist.zone CHECK 约束、CLI `asyncio.run` 开销、Windows SIGTERM、Gemma 模型名约定）。
