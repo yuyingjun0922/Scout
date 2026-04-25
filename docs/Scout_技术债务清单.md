@@ -441,6 +441,79 @@ Phase 2B（5 月）
 
 ---
 
+## TD-013 · industry_dict 表与 watchlist 数据孤岛 + 字段功能重复
+
+- **优先级**：🔴 高
+- **类型**：架构 TD
+- **发现日期**：2026-04-25（半导体设备字段填写时 cross-check 发现）
+- **修复时机**：Phase 2A（2026-05）
+- **状态**：未启动；今天完成发现 + 决策预案，未动 schema
+
+### 现状
+
+`sub_industries` 字段已存在，但**不在 watchlist 表，而在 `industry_dict` 表**（v1.58 加，[knowledge/init_db.py:119](knowledge/init_db.py:119)，含结构化 JSON `[{name, fillability}, ...]`）。这导致：
+
+1. **覆盖错位**：`industry_dict` 只 7 行，watchlist active 19 行，**只 5 行重叠**（其中 1 行 sub_industries 是空数组）；半导体设备 + 14 个其他主力行业**根本不在 industry_dict**
+2. **`industry_dict.in_watchlist` 全是 0**，但其中 5 行实际在 watchlist active —— 字段从未被维护
+3. **`industry_dict.supply_chain_readiness` 全 NULL**（与 `watchlist.gap_fillability` 功能重复，也都全 NULL）—— 两套相似设计互相不知道
+4. **`agents/` 目录零代码读 `industry_dict`** —— 这张表对运行态零价值
+
+### 根因
+
+v1.58 蓝图把 `sub_industries` 放 `industry_dict` 是**架构洁癖**：理论上"行业字典"承载元信息，watchlist 只承载"被关注哪些"是干净的 normalized schema。但实际写代码的人发现 watchlist 已经有 industry_name + 大量元字段（motivation/gap/thesis），再去 industry_dict JOIN 一次是无谓 overhead，所以代码漂向 "watchlist 一站式"。
+
+`v1.02 industry refresh` 当时只补 7 个新行业到 industry_dict，老 15 个根本没回填 —— 进一步证明 `industry_dict` 不是被当作"全行业字典"在用，而是被当作 **"新增行业 staging"** 用了。蓝图 v1.58 的 normalized 设计意图已被代码实现否决，应该承认这点让 schema 顺应事实。
+
+### 修复方案选项评估
+
+| 选项 | 描述 | 评估 |
+|---|---|---|
+| A | 补 15 行业进 industry_dict + 改 RecommendationAgent 读两表 | ❌ 为已死设计输血；6 个月后还会再失修 |
+| B | watchlist 加 sub_industries 列 + 废弃 industry_dict.sub_industries | ✅ **推荐** |
+| C | 建 vw_industry_full view JOIN 两表 | ❌ 回避问题；当下问题是数据没填，不是查询路径乱 |
+| D | 暂停 + 等 Phase 2A 决定 | ❌ procrastination；信息已齐 |
+
+### 推荐方案 B 实施步骤
+
+1. **schema migration**（`scripts/migrations/2026-05-XX_watchlist_extend.py`）：
+   ```sql
+   ALTER TABLE watchlist ADD COLUMN sub_industries TEXT;     -- v1.58 JSON
+   ALTER TABLE watchlist ADD COLUMN cyclical INTEGER;        -- 从 industry_dict 迁
+   ALTER TABLE watchlist ADD COLUMN global_leaders TEXT;     -- 从 industry_dict 迁
+   ALTER TABLE watchlist ADD COLUMN historical_cycles TEXT;  -- 从 industry_dict 迁
+   ALTER TABLE watchlist ADD COLUMN why_different_now TEXT;  -- 从 industry_dict 迁
+   ```
+
+2. **数据迁移**：
+   - `industry_dict.sub_industries`（4 行有数据）→ `watchlist.sub_industries`
+   - `watchlist.notes` 的 `[subs=...]` 段 → 解析成 JSON 写到 `watchlist.sub_industries`，notes 段移除
+   - `industry_dict.cyclical/scout_range` → `watchlist`（注意 scout_range vs zone 概念冲突需先决定）
+
+3. **废弃 `industry_dict.sub_industries` / `supply_chain_readiness` / `readiness_evidence` / `readiness_bottleneck` / `in_watchlist`** —— 5 个未维护或重复字段
+4. **保留 industry_dict** 作为 v1.02 cold start staging 历史记录，不再写入新行；或彻底 DROP（待决定）
+5. **关掉 CLAUDE.md §5 那条 TD**（"watchlist.notes composite 字符串 → 拆 sub_industries 列"）
+
+### 不立即修理由
+
+1. 不阻塞当前推荐管线（agents 不读 industry_dict，所以现在没"功能 bug"）
+2. 半导体设备等 5 个不依赖 sub_industries 的字段今天先填了（gap_fillability/gap_analysis/thesis/kill_conditions/motivation_detail），端到端验证显示 d3 从 50→100，002371/688012 总分 81.56→90.94 **证明补 watchlist 字段确有收益**
+3. ALTER TABLE + migration + 数据迁移需要 1-2 天，应排进 Phase 2A 完整窗口
+
+### 预期工作量
+
+- schema migration + init_db 同步: 0.5 天
+- 数据迁移脚本（含 notes 解析）: 0.5 天
+- 测试 + 回归: 0.5 天
+- **合计 1-2 天**
+
+### 详见
+
+- [docs/Scout_技术债务清单.md](docs/Scout_技术债务清单.md) 本条 + CLAUDE.md §5 watchlist.notes TD
+- [scripts/update_semi_eq_5fields.py](scripts/update_semi_eq_5fields.py) 验证实验
+- 验证结果：002371/688012 81.56 → 90.94 (+9.38)，d3 50→100，A 级地位巩固
+
+---
+
 ## TD-001（历史：Ollama helper 代码重复等）
 
 > 见 [CLAUDE.md §5 重要技术债务](../CLAUDE.md) 原清单（Ollama helper 抽取、`__init__.py` 缺失、watchlist.notes composite 字符串、queue.db UNIQUE 缺失、watchlist.zone CHECK 约束、CLI `asyncio.run` 开销、Windows SIGTERM、Gemma 模型名约定）。
