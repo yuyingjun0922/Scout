@@ -915,6 +915,34 @@ WEIGHTS_BY_MARKET = {
 - [docs/Scout_完整蓝图盘点_2026-04-25.md](Scout_完整蓝图盘点_2026-04-25.md) C2 / V158-05
 - [docs/Scout_设计意图与实现偏离.md](Scout_设计意图与实现偏离.md) 第五A节
 
+### 2026-04-25 dry-run 发现
+
+**dry-run 结果摘要**:
+- 230 条 recommendations **全部 market=A**
+- 3 只 A 级（002371 / 688012 / 688082）新权重下**全部下降 -2 ~ -9 点**（高 PEG 被 d6 加重权重打压）
+- 总体: 升级 34 / 降级 5 / 无变化 191
+
+**阻塞链路**:
+- [agents/recommendation_agent.py:347-360](agents/recommendation_agent.py) `load_universe` SQL `WHERE market='A'` 硬过滤 → KR/US 标的根本进不了推荐池
+- **真正阻塞**: KR/US 财务覆盖 **0%**（48 个 KR/US 标的进 `related_stocks`，**0 个**进 `stock_financials`，has_z/peg/f 全 0）
+- FinancialAgent (v1.01) 当前只覆盖 A 股，蓝图设计的"韩股 OpenDART 全自动 / 美股 yfinance"未实装
+
+**状态变更**: 未启动 → **blocked by Phase 2A KR/US 财务采集**
+
+**branch 留存**: [td-020-dryrun](https://github.com/yuyingjun0922/Scout/tree/td-020-dryrun) — **不合并**，作为反推权重设计的实证存档
+
+**反推权重 v1.0 基线**（暂存，等 Phase 2A 财务采集到位后激活）:
+
+```python
+WEIGHTS_BY_MARKET = {
+    'A':  {'d1': 15, 'd2': 10, 'd3': 20, 'd4': 20, 'd5': 20, 'd6': 15},
+    'KR': {'d1': 12, 'd2':  8, 'd3': 15, 'd4': 20, 'd5': 30, 'd6': 15},
+    'US': {'d1':  5, 'd2':  5, 'd3': 15, 'd4': 15, 'd5': 35, 'd6': 25},
+}
+```
+
+详见 [docs/Scout_能力边界_2026-04-25.md](Scout_能力边界_2026-04-25.md) 4 个事实归档。
+
 ---
 
 ## TD-021 · V160 mixed_subtype 下游分级处理缺失
