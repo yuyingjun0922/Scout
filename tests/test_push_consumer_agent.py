@@ -490,3 +490,213 @@ class TestMarkRead:
 
     def test_mark_read_unknown_event(self, agent):
         assert agent.mark_read("bogus-event-id") is False
+
+
+# ═══════════════════ v1.61 Quiet Hours ═══════════════════
+
+
+class _FakeChannel:
+    """接 deliver_pending 的测试 channel（send→(ok, detail)）。"""
+
+    def __init__(self, ok: bool = True):
+        self.ok = ok
+        self.sent: list = []
+
+    def send(self, text: str):
+        self.sent.append(text)
+        return (self.ok, {} if self.ok else {"error": "fake_fail"})
+
+
+class TestQuietHoursIntegration:
+    """PushConsumerAgent 在启用 QuietHoursPolicy 时的端到端行为。"""
+
+    def _quiet_agent(self, kdb, qm, start="00:00", end="23:59"):
+        """构造一个"整天都是静默期"的 agent，便于测静默门禁。"""
+        from utils.push_policy import QuietHoursPolicy
+        from agents.push_consumer_agent import PushConsumerAgent
+        policy = QuietHoursPolicy.from_config({
+            "enabled": True, "start": start, "end": end,
+            "timezone": "KST", "always_push_levels": ["P0", "P1"],
+            "digest_at": "07:30",
+        })
+        return PushConsumerAgent(kdb=kdb, qm=qm, quiet_hours_policy=policy)
+
+    def test_p0_p1_delivered_in_quiet_window(
+        self, tmp_kdb, tmp_qm, push_queue,
+    ):
+        """静默期内 red(P0) / yellow(P1) 照推，不进 quiet_held。"""
+        agent = self._quiet_agent(tmp_kdb, tmp_qm)
+        push_queue.push("alert", {}, priority="red", entity_key="r1")
+        push_queue.push("alert", {}, priority="yellow", entity_key="y1")
+        channel = _FakeChannel(ok=True)
+
+        result = agent.deliver_pending(channel, max=10)
+        assert result["delivered"] == 2
+        assert result["quiet_held"] == 0
+        assert len(channel.sent) == 2
+
+    def test_p2_p3_p4_held_in_quiet_window(
+        self, tmp_kdb, tmp_qm, push_queue,
+    ):
+        """静默期内 blue(P2)/white(P3)/未知级别 全部攒起来。"""
+        agent = self._quiet_agent(tmp_kdb, tmp_qm)
+        push_queue.push("alert", {}, priority="blue", entity_key="b1")
+        push_queue.push("alert", {}, priority="white", entity_key="w1")
+        # 未知 priority → P4（不该发生但防御）
+        push_queue.push("alert", {}, priority="blue", entity_key="b2")
+        channel = _FakeChannel(ok=True)
+
+        result = agent.deliver_pending(channel, max=10)
+        assert result["delivered"] == 0
+        assert result["quiet_held"] == 3
+        assert channel.sent == []
+
+        # 3 条 row 在 queue.db 里应当 status='quiet_held'
+        tmp_qm._ensure_open()
+        cur = tmp_qm.conn.cursor()
+        try:
+            held = cur.execute(
+                "SELECT COUNT(*) AS c FROM message_queue WHERE status='quiet_held'"
+            ).fetchone()
+        finally:
+            cur.close()
+        assert held["c"] == 3
+
+    def test_outside_quiet_window_all_delivered(
+        self, tmp_kdb, tmp_qm, push_queue,
+    ):
+        """启用但窗口 [00:00, 00:01) → 几乎永远不在静默期 → 全部直推。"""
+        agent = self._quiet_agent(
+            tmp_kdb, tmp_qm, start="00:00", end="00:01"
+        )
+        # 跑 test 的时刻 99.999% 概率不在 [00:00, 00:01) 窗口
+        push_queue.push("alert", {}, priority="blue", entity_key="b1")
+        push_queue.push("alert", {}, priority="white", entity_key="w1")
+        channel = _FakeChannel(ok=True)
+
+        # 跳过刚好在 00:00~00:01 KST 这 1 分钟里跑到的情况
+        now_kst = datetime.now(timezone(timedelta(hours=9)))
+        if now_kst.hour == 0 and now_kst.minute == 0:
+            pytest.skip("rare: test executed within 00:00-00:01 KST")
+
+        result = agent.deliver_pending(channel, max=10)
+        assert result["delivered"] == 2
+        assert result["quiet_held"] == 0
+
+    def test_disabled_policy_never_holds(
+        self, tmp_kdb, tmp_qm, push_queue,
+    ):
+        from utils.push_policy import QuietHoursPolicy
+        from agents.push_consumer_agent import PushConsumerAgent
+        agent = PushConsumerAgent(
+            kdb=tmp_kdb, qm=tmp_qm,
+            quiet_hours_policy=QuietHoursPolicy.disabled(),
+        )
+        push_queue.push("alert", {}, priority="white", entity_key="w1")
+        channel = _FakeChannel(ok=True)
+
+        result = agent.deliver_pending(channel, max=10)
+        assert result["delivered"] == 1
+        assert result["quiet_held"] == 0
+
+
+class TestFlushQuietDigest:
+    """flush_quiet_digest：3 条攒着 → digest 合并 → 全 done。"""
+
+    def _quiet_agent(self, kdb, qm):
+        """整天静默期的 agent（便于把消息都灌进 quiet_held）。"""
+        from utils.push_policy import QuietHoursPolicy
+        from agents.push_consumer_agent import PushConsumerAgent
+        policy = QuietHoursPolicy.from_config({
+            "enabled": True, "start": "00:00", "end": "23:59",
+            "timezone": "KST", "always_push_levels": ["P0", "P1"],
+            "digest_at": "07:30",
+        })
+        return PushConsumerAgent(kdb=kdb, qm=qm, quiet_hours_policy=policy)
+
+    def test_empty_held_returns_none(self, tmp_kdb, tmp_qm):
+        agent = self._quiet_agent(tmp_kdb, tmp_qm)
+        assert agent.flush_quiet_digest() is None
+
+    def test_three_p3_p4_merged_into_digest(
+        self, tmp_kdb, tmp_qm, push_queue,
+    ):
+        """灌 3 条 P3/P2，deliver_pending 把它们 held，flush_quiet_digest
+        汇总成 1 条 digest，原 3 条标 done。"""
+        agent = self._quiet_agent(tmp_kdb, tmp_qm)
+        push_queue.push("alert", {"msg": "one"}, priority="blue", entity_key="b1")
+        push_queue.push("alert", {"msg": "two"}, priority="white", entity_key="w1")
+        push_queue.push("alert", {"msg": "three"}, priority="blue", entity_key="b2")
+
+        # 先跑 deliver 把它们全压成 quiet_held
+        channel = _FakeChannel(ok=True)
+        agent.deliver_pending(channel, max=10)
+        assert channel.sent == []
+
+        # 验证 quiet_held 有 3 条
+        tmp_qm._ensure_open()
+        cur = tmp_qm.conn.cursor()
+        try:
+            held_count = cur.execute(
+                "SELECT COUNT(*) AS c FROM message_queue WHERE status='quiet_held'"
+            ).fetchone()["c"]
+        finally:
+            cur.close()
+        assert held_count == 3
+
+        # 跑 digest flush
+        digest_ev = agent.flush_quiet_digest()
+        assert digest_ev is not None
+
+        # 原 3 条 → done；digest 自己 → pending（等下一轮 deliver）
+        tmp_qm._ensure_open()
+        cur = tmp_qm.conn.cursor()
+        try:
+            stats = {
+                r["status"]: r["c"] for r in cur.execute(
+                    "SELECT status, COUNT(*) AS c FROM message_queue GROUP BY status"
+                ).fetchall()
+            }
+        finally:
+            cur.close()
+
+        assert stats.get("done", 0) == 3
+        assert stats.get("quiet_held", 0) == 0
+        assert stats.get("pending", 0) == 1     # digest 本身
+
+        # digest content 包含 3 条预览
+        rows = tmp_qm.peek(QUEUE_NAME, limit=10)
+        digest_row = next(
+            r for r in rows if r["event_id"] == digest_ev
+        )
+        payload = digest_row["payload"]
+        assert payload["message_type"] == "daily_briefing"
+        assert payload["priority"] == "blue"
+        content = payload["content"]
+        assert content["digest_kind"] == "quiet_hours_release"
+        assert content["count"] == 3
+        assert len(content["items"]) == 3
+
+    def test_digest_entity_key_does_not_collide_with_daily_briefing(
+        self, tmp_kdb, tmp_qm, push_queue,
+    ):
+        """quiet_digest_{date} ≠ daily_briefing_{date}，两者同日共存。"""
+        agent = self._quiet_agent(tmp_kdb, tmp_qm)
+        push_queue.push("alert", {}, priority="blue", entity_key="x")
+        agent.deliver_pending(_FakeChannel(ok=True), max=10)
+
+        quiet_ev = agent.flush_quiet_digest()
+        # 09:30 路径的 daily_briefing
+        daily_ev = push_queue.push_daily_briefing(
+            content={"kind": "normal"}, priority="blue",
+        )
+
+        assert quiet_ev is not None
+        assert daily_ev is not None
+        assert quiet_ev != daily_ev
+
+        rows = tmp_qm.peek(QUEUE_NAME, limit=20)
+        keys = {r["entity_key"] for r in rows}
+        # 两个 briefing 都入队
+        assert any(k.startswith("quiet_digest_") for k in keys)
+        assert any(k.startswith("daily_briefing_") for k in keys)

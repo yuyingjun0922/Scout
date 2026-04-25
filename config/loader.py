@@ -13,10 +13,10 @@ config/loader.py — Scout 配置加载器（v1.57 决策4 的扩展）
 """
 import os
 from pathlib import Path
-from typing import Dict, Literal, Optional
+from typing import Dict, List, Literal, Optional
 
 import yaml
-from pydantic import BaseModel, ConfigDict, Field, model_validator
+from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
 try:
     from dotenv import load_dotenv
@@ -147,6 +147,55 @@ class QQPushConfig(BaseModel):
     max_content_length: int = Field(default=900, ge=10, le=4000)
 
 
+class QuietHoursConfig(BaseModel):
+    """v1.61 勿扰时段配置。静默期内 P2-P4 默认攒 digest，P0/P1 照推。"""
+
+    model_config = ConfigDict(extra='forbid')
+
+    enabled: bool = True
+    start: str = Field(default="00:00")
+    end: str = Field(default="07:30")
+    timezone: Literal['KST'] = 'KST'                 # Phase 1 仅支持 KST
+    always_push_levels: List[str] = Field(
+        default_factory=lambda: ["P0", "P1"]
+    )
+    digest_at: str = Field(default="07:30")
+
+    @field_validator('start', 'end', 'digest_at')
+    @classmethod
+    def _hhmm(cls, v: str) -> str:
+        if not isinstance(v, str) or ':' not in v:
+            raise ValueError(f"must be 'HH:MM' string, got {v!r}")
+        try:
+            hh, mm = v.split(':', 1)
+            h, m = int(hh), int(mm)
+        except (ValueError, TypeError) as e:
+            raise ValueError(f"malformed {v!r}: {e}") from e
+        if not (0 <= h <= 23 and 0 <= m <= 59):
+            raise ValueError(f"{v!r} out of HH:MM range")
+        return v
+
+    @field_validator('always_push_levels')
+    @classmethod
+    def _levels(cls, v: List[str]) -> List[str]:
+        allowed = {"P0", "P1", "P2", "P3", "P4"}
+        unknown = [lv for lv in v if lv not in allowed]
+        if unknown:
+            raise ValueError(
+                f"always_push_levels contains unknown {unknown}; "
+                f"allowed: {sorted(allowed)}"
+            )
+        return v
+
+
+class PushConfig(BaseModel):
+    """v1.61 push 节：勿扰 / 未来的配额等全局推送策略。"""
+
+    model_config = ConfigDict(extra='forbid')
+
+    quiet_hours: Optional[QuietHoursConfig] = None
+
+
 # ═══ 根 schema ═══
 
 class ScoutConfig(BaseModel):
@@ -163,6 +212,7 @@ class ScoutConfig(BaseModel):
     testing: TestingConfig
     mode: Literal['cold_start', 'running', 'diagnosis']
     qq_push: Optional[QQPushConfig] = None
+    push: Optional[PushConfig] = None                  # v1.61 勿扰时段
 
     # v1.48 LLM 抽象层 —— llm_providers 为可选以保留向后兼容（旧 config.yaml 仍可读）
     llm_providers: Dict[str, LLMProviderConfig] = Field(default_factory=dict)

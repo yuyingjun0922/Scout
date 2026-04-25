@@ -174,6 +174,7 @@ class ScoutRunner:
         d4_industries_keywords: Optional[Dict[str, List[str]]] = None,
         gemma_available: bool = True,
         qq_channel: Optional[Any] = None,
+        quiet_hours_policy: Optional[Any] = None,
     ):
         self.kdb = kdb
         self.qdb = qdb
@@ -186,6 +187,7 @@ class ScoutRunner:
         self.d4_industries_keywords = d4_industries_keywords
         self.gemma_available = gemma_available
         self.qq_channel = qq_channel  # v1.13：外部推送通道（QQPushChannel 或 None）
+        self.quiet_hours_policy = quiet_hours_policy  # v1.61 勿扰；None → disabled
 
         self.shutdown_event: Optional[asyncio.Event] = None
         self.scheduler: Optional[Any] = None
@@ -583,6 +585,7 @@ class ScoutRunner:
         """v1.13：每 10 分钟把 push_outbox pending → QQ（告警快速送达）。
 
         需要 self.qq_channel 注入；否则 skip（Phase 1 MCP 拉取模式仍可用）。
+        v1.61 起：deliver_pending 内置勿扰门禁，P2-P4 在静默窗口会被转 quiet_held。
         """
         if self.qq_channel is None:
             return
@@ -593,15 +596,38 @@ class ScoutRunner:
             result = await self._run_in_thread(
                 consumer.deliver_pending, self.qq_channel, 20
             )
-            if result["delivered"] or result["failed"]:
+            if result["delivered"] or result["failed"] or result.get("quiet_held"):
                 self.logger.info(
                     f"[push_consumer:deliver] delivered={result['delivered']} "
                     f"failed={result['failed']} "
+                    f"quiet_held={result.get('quiet_held', 0)} "
                     f"skipped={result['skipped_filter']}"
                 )
             self._clear_failure("push_consumer_deliver")
         except Exception as e:
             self._handle_failure("push_consumer_deliver", e)
+
+    async def job_push_quiet_digest(self) -> None:
+        """v1.61：静默期结束时（默认 07:30 KST）把 quiet_held 消息汇总成一条
+        daily_briefing 入队。entity_key=quiet_digest_{KST_date}，不撞 09:30 的
+        daily_briefing。deliver 路径下一次跑时会把 digest 投出去。"""
+        consumer = self._build_push_consumer()
+        if consumer is None:
+            self.logger.info("[push_consumer:quiet_digest] skipped (no push_queue)")
+            return
+        try:
+            event_id = await self._run_in_thread(consumer.flush_quiet_digest)
+            if event_id:
+                self.logger.info(
+                    f"[push_consumer:quiet_digest] pushed event_id={event_id[:8]}..."
+                )
+            else:
+                self.logger.info(
+                    "[push_consumer:quiet_digest] no quiet_held items; skipped"
+                )
+            self._clear_failure("push_consumer_quiet_digest")
+        except Exception as e:
+            self._handle_failure("push_consumer_quiet_digest", e)
 
     async def job_health_check_errors(self) -> None:
         """v1.13：每 15 分钟扫 agent_errors，近期错误 → push_alert(data_source_down)。"""
@@ -774,13 +800,16 @@ class ScoutRunner:
         return self.direction_agent
 
     def _build_push_consumer(self) -> Optional[Any]:
-        """v1.12：lazy-build PushConsumerAgent。push_queue 缺失返 None。"""
+        """v1.12：lazy-build PushConsumerAgent。push_queue 缺失返 None。
+        v1.61：注入 quiet_hours_policy（None → agent 内部默认 disabled）。"""
         if self.push_queue is None:
             return None
         if self.push_consumer is None:
             from agents.push_consumer_agent import PushConsumerAgent
             self.push_consumer = PushConsumerAgent(
-                kdb=self.kdb, push_queue=self.push_queue
+                kdb=self.kdb,
+                push_queue=self.push_queue,
+                quiet_hours_policy=self.quiet_hours_policy,
             )
         return self.push_consumer
 
@@ -947,6 +976,21 @@ class ScoutRunner:
             self.job_push_daily_digest,
             CronTrigger(hour=9, minute=30, timezone=KST),
             id="push_consumer_digest",
+            replace_existing=True, max_instances=1,
+            misfire_grace_time=3600,
+        )
+        #   v1.61：静默期结束 KST 时刻触发 quiet_digest flush（默认 07:30）
+        #   quiet_hours_policy 关闭时 flush 也会跑但返 None（无 held 不推）
+        qh_digest_hour, qh_digest_minute = 7, 30
+        if self.quiet_hours_policy is not None and getattr(
+            self.quiet_hours_policy, "enabled", False
+        ):
+            qh_digest_hour = self.quiet_hours_policy.digest_at.hour
+            qh_digest_minute = self.quiet_hours_policy.digest_at.minute
+        self.scheduler.add_job(
+            self.job_push_quiet_digest,
+            CronTrigger(hour=qh_digest_hour, minute=qh_digest_minute, timezone=KST),
+            id="push_consumer_quiet_digest",
             replace_existing=True, max_instances=1,
             misfire_grace_time=3600,
         )
@@ -1895,6 +1939,11 @@ def main(argv: Optional[List[str]] = None) -> int:
             else:
                 logger.info("[serve] qq_channel disabled (cfg.qq_push is None or disabled)")
 
+            # v1.61 勿扰策略 —— cfg.push.quiet_hours 缺失 → disabled()
+            from utils.push_policy import QuietHoursPolicy
+            qh_cfg = getattr(getattr(cfg, "push", None), "quiet_hours", None)
+            quiet_hours_policy = QuietHoursPolicy.from_config(qh_cfg)
+
             runner = ScoutRunner(
                 kdb=kdb, qdb=qm, push_queue=push_queue,
                 logger=logger,
@@ -1902,6 +1951,7 @@ def main(argv: Optional[List[str]] = None) -> int:
                 ollama_host=ollama_host, ollama_model=ollama_model,
                 gemma_available=gemma_ok,
                 qq_channel=qq_channel,
+                quiet_hours_policy=quiet_hours_policy,
             )
             return asyncio.run(
                 runner.run(max_runtime_seconds=args.max_runtime_seconds)

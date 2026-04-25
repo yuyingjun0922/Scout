@@ -642,6 +642,8 @@ class TestScoutRunnerSchedule:
                 # v1.13 外发 + 健康监控
                 "push_consumer_deliver",
                 "health_check_errors", "health_heartbeat",
+                # v1.61 勿扰时段 digest
+                "push_consumer_quiet_digest",
             }
             assert job_ids == expected
         finally:

@@ -118,6 +118,18 @@ testing:
 # ═══ 运行模式 ═══
 mode: cold_start                          # cold_start / running / diagnosis
 
+# ═══ Push 全局策略（v1.61 勿扰时段）═══
+# P0=critical(red) / P1=high(yellow) / P2=normal(blue) / P3=low(white) / P4=default
+# 静默期内 always_push_levels 照推，其它级别攒到 digest_at 合并成一条 digest。
+push:
+  quiet_hours:
+    enabled: true
+    start: "00:00"                           # KST 本地时间 HH:MM
+    end: "07:30"                             # 窗口半开 [start, end)
+    timezone: KST                            # Phase 1 仅支持 KST
+    always_push_levels: ["P0", "P1"]         # 静默期照推的级别
+    digest_at: "07:30"                       # 静默期结束 → digest flush 时刻
+
 # ═══ QQ 主动推送（v1.13 Phase 2A）═══
 # 通过 QQ 开放平台 C2C API 把 push_outbox 里的消息推到指定用户。
 # 所有 secrets 通过 .env 注入（见 .env.example）；明文不入 YAML/CI。

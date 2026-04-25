@@ -40,6 +40,13 @@ from infra.push_queue import (
     VALID_ALERT_TYPES,
 )
 from infra.queue_manager import QueueManager
+from utils.push_policy import (
+    QUIET_HELD_STATUS,
+    QuietHoursPolicy,
+    extract_alert_level,
+    get_quiet_hours_digest,
+    should_push_now,
+)
 from utils.time_utils import now_utc
 
 
@@ -73,13 +80,20 @@ class PushConsumerAgent(BaseAgent):
         kdb: DatabaseManager,
         qm: Optional[QueueManager] = None,
         push_queue: Optional[PushQueue] = None,
+        quiet_hours_policy: Optional[QuietHoursPolicy] = None,
     ):
         if push_queue is None and qm is None:
             raise RuleViolation("PushConsumerAgent requires push_queue or qm")
         super().__init__(name="push_consumer_agent", db=kdb)
         self.push_queue = push_queue or PushQueue(qm)
-        # qm 引用保留用于直接 SQL（cleanup / dedupe 需要）
+        # qm 引用保留用于直接 SQL（cleanup / dedupe / quiet_held 转换需要）
         self.qm = push_queue.qm if push_queue is not None else qm
+        # v1.61 勿扰：None → disabled 策略（deliver_pending 不挂任何门禁）
+        self.quiet_hours_policy = (
+            quiet_hours_policy
+            if quiet_hours_policy is not None
+            else QuietHoursPolicy.disabled()
+        )
 
     # ─────────────── 主入口 ───────────────
 
@@ -526,8 +540,24 @@ class PushConsumerAgent(BaseAgent):
 
         delivered = 0
         failed = 0
+        quiet_held = 0             # v1.61 新计数：本轮被勿扰门禁攒起来的条数
         errors: List[Dict[str, Any]] = []
         for m in considered:
+            # v1.61 静默门禁：P0/P1（或 always_push_levels 里配的）直推；
+            #                其它级别 → 状态改为 quiet_held，等 07:30 digest flush
+            alert_level = extract_alert_level({
+                "priority": m.get("priority"),
+                "content": m.get("content"),
+            })
+            if not should_push_now(self.quiet_hours_policy, alert_level):
+                if self._mark_quiet_held(m["event_id"]):
+                    quiet_held += 1
+                    self.logger.info(
+                        f"[push_consumer] quiet_held event_id={m['event_id']} "
+                        f"alert_level={alert_level} priority={m.get('priority')}"
+                    )
+                continue
+
             text = _format_for_qq(m)
             try:
                 ok, detail = channel.send(text)
@@ -554,11 +584,128 @@ class PushConsumerAgent(BaseAgent):
         return {
             "delivered": delivered,
             "failed": failed,
+            "quiet_held": quiet_held,
             "skipped_filter": skipped_filter,
             "total_considered": len(considered),
             "errors": errors,
             "ts_utc": now_utc(),
         }
+
+    # ─────────────── 勿扰时段 digest（07:30 KST）───────────────
+
+    def flush_quiet_digest(self) -> Optional[str]:
+        """静默期结束时把所有 status='quiet_held' 的消息汇总成一条 digest 入队，
+        原 held 条目标为 done（event_id 留痕，不回 pending）。
+
+        返回新 digest event_id；若没 held 条目则返 None（不推空 digest）。
+
+        digest 自身 entity_key=`quiet_digest_{YYYYMMDD}`（KST 日期），不撞车
+        09:30 的 daily_briefing_{date}。message_type=daily_briefing（复用
+        VALID_MESSAGE_TYPES），priority=blue。
+        """
+        held = get_quiet_hours_digest(self.qm)
+        if not held:
+            self.logger.info(
+                "[push_consumer:quiet_digest] no quiet_held; skipped"
+            )
+            return None
+
+        summary: List[Dict[str, Any]] = []
+        for m in held:
+            summary.append({
+                "event_id": m.get("event_id"),
+                "message_type": m.get("message_type"),
+                "priority": m.get("priority"),
+                "alert_level": m.get("alert_level"),
+                "preview": _preview_content(m.get("content")),
+                "created_at": m.get("created_at"),
+            })
+
+        content = {
+            "digest_kind": "quiet_hours_release",
+            "count": len(summary),
+            "items": summary,
+            "note": (
+                f"{len(summary)} 条勿扰期积压消息（P2-P4）。"
+                f"通过 MCP get_pending_messages 逐条查看。"
+            ),
+        }
+
+        # KST 日期串（不 import push_queue 内部 helper，自己拎）
+        from zoneinfo import ZoneInfo
+        kst_date = datetime.now(tz=ZoneInfo("Asia/Seoul")).strftime("%Y%m%d")
+        entity_key = f"quiet_digest_{kst_date}"
+
+        event_id = self.push_queue.push(
+            message_type="daily_briefing",
+            content=content,
+            priority="blue",
+            producer="push_consumer_quiet_digest",
+            entity_key=entity_key,
+        )
+
+        # 原 held 条目标 done（SQL 直改 —— PushQueue.mark_delivered 只接
+        # pending/processing，quiet_held 不在其列）。
+        released = self._mark_many_released(
+            [m["event_id"] for m in held]
+        )
+        self.logger.info(
+            f"[push_consumer:quiet_digest] event_id={event_id[:8]}... "
+            f"held={len(held)} released={released}"
+        )
+        return event_id
+
+    # ─────────────── quiet_held 状态翻转（内部）───────────────
+
+    def _mark_quiet_held(self, event_id: str) -> bool:
+        """把 pending 消息转成 quiet_held；done/failed/已 quiet_held → 不动。
+
+        不改 retries / processed_at（静默并非失败；deliver_pending 取不到，
+        等 flush_quiet_digest 收走即可）。
+        """
+        self.qm._ensure_open()
+        cur = self.qm.conn.cursor()
+        try:
+            cur.execute("BEGIN IMMEDIATE")
+            updated = cur.execute(
+                """UPDATE message_queue
+                   SET status = ?
+                   WHERE event_id = ? AND queue_name = ?
+                     AND status = 'pending'""",
+                (QUIET_HELD_STATUS, event_id, QUEUE_NAME),
+            )
+            self.qm.conn.commit()
+            return updated.rowcount > 0
+        except Exception:
+            self.qm.conn.rollback()
+            raise
+        finally:
+            cur.close()
+
+    def _mark_many_released(self, event_ids: List[str]) -> int:
+        """把 quiet_held 批量转成 done。返回 UPDATE 生效行数。"""
+        if not event_ids:
+            return 0
+        self.qm._ensure_open()
+        cur = self.qm.conn.cursor()
+        placeholders = ",".join("?" * len(event_ids))
+        try:
+            cur.execute("BEGIN IMMEDIATE")
+            res = cur.execute(
+                f"""UPDATE message_queue
+                    SET status='done', processed_at=?, error_message=NULL
+                    WHERE event_id IN ({placeholders})
+                      AND queue_name=?
+                      AND status=?""",
+                (now_utc(), *event_ids, QUEUE_NAME, QUIET_HELD_STATUS),
+            )
+            self.qm.conn.commit()
+            return res.rowcount
+        except Exception:
+            self.qm.conn.rollback()
+            raise
+        finally:
+            cur.close()
 
 
 # ═══════════════════ 工具 ═══════════════════
