@@ -345,14 +345,16 @@ class RecommendationAgent(BaseAgent):
         return dict(row) if row else None
 
     def load_universe(self) -> List[str]:
-        """A 股 active 全量。"""
+        """A 股 active 全量（watchlist.zone IN ('cold','observation') 行业排除）。"""
         try:
             rows = self.db.query(
-                """SELECT DISTINCT stock_code FROM related_stocks
-                   WHERE market = 'A' AND status = 'active'
-                     AND confidence != 'staging'
-                     AND stock_code IS NOT NULL
-                     AND length(stock_code) = 6"""
+                """SELECT DISTINCT rs.stock_code FROM related_stocks rs
+                   JOIN watchlist w ON rs.industry_id = w.industry_id
+                   WHERE rs.market = 'A' AND rs.status = 'active'
+                     AND rs.confidence != 'staging'
+                     AND rs.stock_code IS NOT NULL
+                     AND length(rs.stock_code) = 6
+                     AND w.zone NOT IN ('cold', 'observation')"""
             )
             return [r["stock_code"] for r in rows]
         except sqlite3.Error as e:

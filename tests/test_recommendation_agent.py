@@ -784,6 +784,53 @@ class TestUniverseAndRun:
         universe = agent.load_universe()
         assert "60000" not in universe
 
+    def test_load_universe_excludes_observation_zone(self, tmp_db, agent):
+        """TD-023 Step 1: zone='observation' 行业的标的应被 JOIN 过滤掉。
+
+        不复用 _seed_industry helper (它写死 zone='active'),
+        直接 INSERT watchlist + related_stocks 控制 zone 值。
+        """
+        tmp_db.write(
+            """INSERT INTO watchlist
+               (industry_id, industry_name, zone, source_type, early_signal)
+               VALUES (?, ?, ?, 'manual', 0)""",
+            (99, "TEST_OBSERVATION_INDUSTRY", "observation"),
+        )
+        tmp_db.write(
+            """INSERT INTO related_stocks
+               (industry_id, industry, stock_code, stock_name, market,
+                discovery_source, discovered_at, confidence, status, updated_at)
+               VALUES (?, ?, ?, ?, 'A', 'test', ?, 'approved', 'active', ?)""",
+            (99, "TEST_OBSERVATION_INDUSTRY", "000099", "TEST_99",
+             _utc(), _utc()),
+        )
+        universe = agent.load_universe()
+        assert "000099" not in universe, \
+            "observation zone 行业的标的应被 load_universe 过滤掉"
+
+    def test_load_universe_includes_active_zone(self, tmp_db, agent):
+        """TD-023 Step 1: zone='active' 行业的标的应正常进入 universe。
+
+        正向对照测试 — 防止 JOIN 把所有标的都过滤掉。
+        """
+        tmp_db.write(
+            """INSERT INTO watchlist
+               (industry_id, industry_name, zone, source_type, early_signal)
+               VALUES (?, ?, ?, 'manual', 0)""",
+            (98, "TEST_ACTIVE_INDUSTRY", "active"),
+        )
+        tmp_db.write(
+            """INSERT INTO related_stocks
+               (industry_id, industry, stock_code, stock_name, market,
+                discovery_source, discovered_at, confidence, status, updated_at)
+               VALUES (?, ?, ?, ?, 'A', 'test', ?, 'approved', 'active', ?)""",
+            (98, "TEST_ACTIVE_INDUSTRY", "000098", "TEST_98",
+             _utc(), _utc()),
+        )
+        universe = agent.load_universe()
+        assert "000098" in universe, \
+            "active zone 行业的标的应包含在 load_universe"
+
     def test_run_batch_summary_structure(self, tmp_db, agent):
         _seed_industry(tmp_db, gap_fillability=4)
         _seed_stock(tmp_db, "600001")
