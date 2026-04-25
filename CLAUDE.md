@@ -1,3 +1,10 @@
+> **⚠️ Scout 项目新会话入场**: 用户提到 Scout 项目时,
+> 第一时间按 [docs/Scout_新会话入场.md](docs/Scout_新会话入场.md) 5 步流程装载上下文,
+> 给用户 SNAPSHOT 后等用户指令。
+> **不擅自启动任何修复或部署**。
+
+---
+
 # CLAUDE.md — Scout 项目记忆
 
 Claude Code 在本仓库的长期记忆。优先读这份。
