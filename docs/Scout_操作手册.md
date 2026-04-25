@@ -1,7 +1,7 @@
 # Scout 操作手册
 
-> Phase-agnostic 操作惯例集合（数据填写规范、字段语义、决策辅助等）。
-> Phase 特定的运维操作见 [Scout操作手册_Phase1.md](Scout操作手册_Phase1.md)。
+> **本文件**: 数据填写惯例 + 字段语义规范 (Phase-agnostic, 跨 Phase 复用)。
+> Phase 1 运维操作见 [Scout操作手册_Phase1.md](Scout操作手册_Phase1.md)。
 
 ---
 
