@@ -106,3 +106,41 @@
 2. **TD-003 申请 SemanticScholar API Key**（10 分钟提交 + 1~5 天审批）
 3. **Phase 2B QQ 插件剩余 5/8 工具**（见 [Scout_开发顺序规划.md](Scout_开发顺序规划.md)）
 4. TD-004/TD-005 观察期，不急
+
+---
+
+## 5. 2026-04-25 实战发现的关键事实
+
+半导体设备 5 字段填写实验（commit `6c6205b`）+ 蓝图 verify + audit 副产物。
+
+### 1. d4 weighted 计算公式
+
+公式：V1/V3/D4 90 天内信号数 → 100 满分，weight 0.10
+实测：002371/688012 都是 16 条信号 → d4 score=100, weighted=10.0
+用途：验证 [TD-014a](Scout_技术债务清单.md#td-014a) 蓝图 "d4 weighted < 6 → 候选级" 触发条件需要此公式（信号数 < 10 才有可能）
+
+### 2. GateAgent verify 加分 mapping
+
+观察：同行业信号 11 条 → verify +5 / 同行业信号 17 条 → verify +5
+含义：似乎是阶梯式加分（≥10 条 +5），不是线性
+用途：预测推荐分数时，phase 3 delta 通常 +5
+**待 verify**：阈值具体在 10 还是其他值；是否还有 +10 / +15 上限。grep `_phase3_verify` 源码可定。
+
+### 3. 半导体设备 industry_id = 1
+
+今天填字段时确认。
+用途：未来扩到其他行业，查 industry_id 用 `SELECT industry_id FROM watchlist WHERE industry_name='X'`
+
+### 4. recommendations 表去重失效 → TD-017
+
+verify：**230 条记录 / 38 stocks / 95 distinct (stock+thesis_hash) → 实际只 ~41% 独立判断**。
+top 重复：002230=8 / 688082=8 / 002371=7 / 688012=7 / 688256=7。
+详见 [TD-017](Scout_技术债务清单.md#td-017--recommendations-表去重失效)。
+
+### 5. watchlist 5 个僵尸行业（0/8 字段）
+
+半导体材料 / 新材料 / 生物制造 / 低空经济 / 独角兽曝光
+状态：在 `watchlist.zone='active'` 但所有精细字段（gap_fillability/gap_analysis/sub_market_signals/motivation_levels/motivation_detail/thesis/kill_conditions/notes-subs）都 NULL。
+注意：其中 4 个（半导体材料/新材料/生物制造/低空经济）在 `industry_dict` 表里**有** sub_industries 数据（见 [TD-013](Scout_技术债务清单.md#td-013--industry_dict-表与-watchlist-数据孤岛--字段功能重复)），但 watchlist 与 industry_dict 数据孤岛导致 RecommendationAgent 看不到。
+处理：待决策（保留 / 移除 / 补完字段），今天不做。
+来源：2026-04-25 [scripts/watchlist_field_audit.py](../scripts/watchlist_field_audit.py) 报告

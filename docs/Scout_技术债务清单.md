@@ -686,6 +686,59 @@ if not meta or not meta.get("industry"):
 
 ---
 
+## TD-017 · recommendations 表去重失效
+
+- **优先级**：🟡 中
+- **类型**：数据质量
+- **发现日期**：2026-04-25
+- **修复时机**：Phase 2B（5 月）
+- **状态**：未启动
+
+### 现状
+
+`recommendations` 表 UNIQUE 约束是 `(stock, thesis_hash, recommended_at)`，但 `recommended_at` 每次 RecommendationAgent 触发都不同（UTC 微秒级 timestamp），所以 UNIQUE **实际从未生效**。
+
+### 证据（2026-04-25 verify SQL）
+
+230 条推荐记录 / 38 个 distinct stocks / **去重后只 95 条独立判断**（按 `stock + thesis_hash`）。即 **~41% 独立率，~59% 是重复**。
+
+Top 重复股票（最多 8 次）：
+- `002230` / `688082`：各 8 次
+- `002371` (北方华创) / `688012` (中微公司) / `688256`：各 7 次（含今天 cmd_recommend 验证 commit `6c6205b` 各 +1）
+- `002007` / `002013` / `002025` / `002028` / `600312` / `300144` / `002179`：各 6 次
+
+002371 7 次级别分布：A=3 / B=2 / candidate=2
+
+### 影响
+
+- "230 条推荐" 实际去重后只 **95 条独立判断**（~41% 独立率）
+- 用户对 Scout 产出量的心理预期被夸大约 2.4×
+- 未来 Phase 4 复盘时，重复条目会**膨胀命中率统计的分母**
+
+### 修复方案（待评估）
+
+| 方案 | 描述 | 优势 | 风险 |
+|---|---|---|---|
+| **A** | 改 UNIQUE 约束为 `(stock, thesis_hash)` | 最干净 | DROP+REBUILD 表，破坏性 migration |
+| **B** | 应用层去重：24h 内同 stock+thesis_hash 不 INSERT | 不动 schema | 写入逻辑变复杂，仍允许跨日重复 |
+| **C** | 保留所有记录但加 `is_latest` 标志 | 历史可追溯（同股不同时段评分对比） | 多一列 + writer 维护 latest 翻转 |
+
+### 工作量
+
+1-2 小时（取决于选哪个方案）
+
+### 不立即修理由
+
+不阻塞当前运行，但影响数据质量认知和未来 Phase 4 复盘统计。Phase 2B 适合一并解决。
+
+### 详见
+
+- 实证 SQL：`SELECT COUNT(*) FROM recommendations` (230) vs `SELECT COUNT(DISTINCT stock||thesis_hash) FROM recommendations` (95)
+- recommendations schema: [knowledge/init_db.py](knowledge/init_db.py) UNIQUE 约束行
+- 也见 docs/Scout_当前进度.md 第 5 节"实战发现"
+
+---
+
 ## TD-001（历史：Ollama helper 代码重复等）
 
 > 见 [CLAUDE.md §5 重要技术债务](../CLAUDE.md) 原清单（Ollama helper 抽取、`__init__.py` 缺失、watchlist.notes composite 字符串、queue.db UNIQUE 缺失、watchlist.zone CHECK 约束、CLI `asyncio.run` 开销、Windows SIGTERM、Gemma 模型名约定）。
