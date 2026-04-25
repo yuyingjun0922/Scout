@@ -994,6 +994,179 @@ elif signal.mixed_subtype == 'structural':
 
 ---
 
+## TD-023 · scout_range 5 档退化为 2 档（v1.55 早期识别机制未实装）
+
+- **优先级**：🔴 高（从 candidate 🟡 升级 — 是 Scout 错过早期 emerging sectors 窗口的核心机制）
+- **类型**：蓝图设计未实装
+- **发现日期**：2026-04-25（subagent 完整盘点 C1，今日评估升级）
+- **修复时机**：Phase 2C（5 月底-6 月）
+- **状态**：未启动
+
+### 现状
+
+蓝图 v1.55 设计了 5 档 `scout_range`：
+
+| 档位 | 含义 | 渗透率 |
+|---|---|---|
+| `early_strict` | 主动观察等待 | < 5% |
+| `early_qualified` | **介入窗口** | 5-15% |
+| `active` | 主动推荐 | 15-30% |
+| `mature` | 减仓考虑 | 30-50% |
+| `out_of_range` | 退出 | > 50% |
+
+实际：`watchlist.zone` **只用 2 档**（`active` / `observation`），v1.55 早期识别机制完全未实装。
+
+### 影响
+
+Scout 错过 "emerging sectors" 早期窗口的根因之一。**当前 Scout 看到的是"已经 active 的行业"，看不到"将要 active"的早期信号**。
+
+### 修复方案
+
+| 步骤 | 内容 |
+|---|---|
+| A | watchlist 加 `scout_range TEXT` 列（5 档枚举） |
+| B | RecommendationAgent 加 `scout_range` 路由逻辑 |
+| C | 冷启动期手工设置每个行业的 `scout_range` |
+| D | 后续接入 `penetration_rate` 自动判断 |
+
+### 工作量
+
+1-2 天
+
+### 关联
+
+- TD-020（三市场权重）+ TD-023 都是 "实装已有设计" Layer 1
+- 蓝图 v1.55 line 4549-4555
+
+---
+
+## TD-024 · policy_risk='fatal' 自动链路缺失
+
+- **优先级**：🟡 中
+- **类型**：蓝图设计未实装
+- **发现日期**：2026-04-25（subagent 完整盘点 C5 / EM-07）
+- **修复时机**：Phase 2B（5 月）
+- **状态**：未启动
+
+### 现状
+
+关键词命中 fatal 风险后，标签写入 `watchlist.policy_risk`，但**无下游动作**：
+
+- 不自动改 zone（active 行业仍 active 跑推荐）
+- 不自动暂停该行业的推荐生成
+
+### 影响
+
+政策风险识别有但**不传导**。极端 case（如教培"双减"重演）Scout 会标记 fatal 但继续推荐。
+
+### 修复方案
+
+```python
+# watchlist 写入 policy_risk='fatal' 时:
+if policy_risk == 'fatal':
+    update_watchlist_zone(industry, zone='cold')
+
+# RecommendationAgent 全量扫描时:
+if industry.zone == 'cold':
+    skip_industry(reason='policy_risk_fatal')
+```
+
+### 工作量
+
+半天
+
+### 详见
+
+- 蓝图 EM-07 line 2258
+- [docs/Scout_完整蓝图盘点_2026-04-25.md](Scout_完整蓝图盘点_2026-04-25.md) C5 / EM-07
+
+---
+
+## TD-025 · industry_dict.sub_industries weight_in_parent 字段缺失
+
+- **优先级**：🟡 中（**但 TD-013 决策后可能消失**）
+- **类型**：数据缺失 + 依赖架构决策
+- **发现日期**：2026-04-25（subagent 完整盘点 C7 / V158-01）
+- **修复时机**：Phase 2A（与 TD-013 一起决策）
+- **状态**：未启动
+
+### 现状
+
+v1.58 设计 `sub_industries` 加权 fillability 评分需 `weight_in_parent` 字段。`industry_dict` 4 行 `sub_industries` 数据**全部没填 weight_in_parent**。
+
+### 依赖关系（关键）
+
+| TD-013 选择 | 本 TD 状态 |
+|---|---|
+| 方案 B（废弃 industry_dict.sub_industries） | **本 TD 自动消失** |
+| 方案 A（保留并扩充） | 本 TD 必须修 |
+
+### 工作量
+
+半天（如果走方案 A）
+
+### 详见
+
+- TD-013（架构决策依赖）
+- 蓝图 V158-01 line 5786
+
+---
+
+## TD-026 · 独角兽曝光性质重新设计
+
+- **优先级**：🔴 高（用户明确"Scout 寻找独角兽"是核心定位）
+- **类型**：设计调整 + 数据源调整
+- **发现日期**：2026-04-25（5 僵尸行业调查 + 用户原意确认）
+- **修复时机**：Phase 2C（5 月底-6 月）或更晚（依赖外部 API key 申请）
+- **状态**：未启动
+
+### 现状
+
+`watchlist` 有"独角兽曝光"行业（id=23），`related_stocks` 配置 MSFT/GOOGL/AMZN/Broadcom/Arista 等 **12 只全部 US mega-cap，不是真独角兽**。12 只全部 0 推荐（RecommendationAgent 不扫 US 大盘）。
+
+### 用户原意（2026-04-25）
+
+> "独角兽的出现可以看出是行业的爆发, scout 就是寻找独角兽"
+
+### 设计矛盾
+
+用户想要 Scout 通过独角兽信号识别行业爆发，**当前实现是把 mega-cap 当独角兽放在 watchlist 行业里**。
+
+### 修复方案（推荐 C — 独角兽作为信号源，不作为 watchlist 行业）
+
+**1. info_units 表加字段**:
+- `mega_round_count`（本期大轮融资次数）
+- `new_unicorn_count`（本期新晋独角兽数）
+
+**2. 数据源接入**:
+- CB Insights API（全球独角兽追踪）
+- Hurun China Unicorn Report（中国侧）
+- ITjuzi / Qichacha / 36Kr（中国侧补充）
+
+**3. 创建 industry-unicorn 历史映射表**:
+- 记录每个行业**首个独角兽出现年**
+- 记录每个行业**首个 D1/D4/D6 信号年**
+- 计算"信号→爆发"lag
+
+**4. d5 维度（标的财务）加监控指标**:
+- 该行业近 6 个月新独角兽数 → 加分
+- 该行业近 6 个月 mega round 数 → 加分
+
+### 废弃方案
+
+- watchlist 删除"独角兽曝光"行业（zone='archived'）
+- related_stocks 12 条 mega-cap 标记为"已 graduate from unicorn"，保留作为历史参考但不入推荐池
+
+### 工作量
+
+2-3 天（含数据源对接）
+
+### 关联
+
+与 TD-020（三市场权重）+ [docs/Scout_设计意图与实现偏离.md](Scout_设计意图与实现偏离.md) 第八节"市场缺口识别"是**同一主题** — 让 Scout 真正能识别新兴机会。
+
+---
+
 ## TD-001（历史：Ollama helper 代码重复等）
 
 > 见 [CLAUDE.md §5 重要技术债务](../CLAUDE.md) 原清单（Ollama helper 抽取、`__init__.py` 缺失、watchlist.notes composite 字符串、queue.db UNIQUE 缺失、watchlist.zone CHECK 约束、CLI `asyncio.run` 开销、Windows SIGTERM、Gemma 模型名约定）。

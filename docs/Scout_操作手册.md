@@ -28,3 +28,13 @@ NULL = 不确定                 → d3=50  (默认通过)
 
 来源: 2026-04-25 半导体设备字段填写实战 + Claude Code 验证 mapping
 （[agents/recommendation_agent.py:641](../agents/recommendation_agent.py) + 蓝图 v1.55 line 5675）
+
+---
+
+## 命名约定备忘 (2026-04-25)
+
+蓝图 v1.61-10 用 `master_opinions`，DB / 代码用 `master_analysis`。两者指**同一概念**。
+
+如未来重构统一命名，**优先采用 `master_analysis`**（已实装在代码中，重构成本低于改蓝图所有引用）。
+
+来源: 2026-04-25 subagent 完整蓝图盘点 V161-10 / TD-NEW-F (C6) — 评估为纯命名问题，不影响功能，不登 TD，仅备忘到此。
