@@ -132,23 +132,7 @@
 
 ### 改进 6: d6 估值 veto 缺失 (优先级 🔴 高)
 
-**当前缺陷**: 6 维度加权分数高但 d6 估值过低 (PEG > 3) 的标的仍可获 A 级。
-2026-04-25 实证: 002371/688012 d6=25 (PEG=4-5, 明显高估) 仍 A 级 90.94。
-
-**吸收内容**: Stage 3 综合判定后加 valuation veto:
-```python
-if level == LEVEL_A and dims["d6"].score < 40:
-    level = LEVEL_B
-    counter.append_note("valuation_veto_applied: d6_score<40")
-```
-
-**修复时机**: Phase 2B (5 月,与 TD-012 一起做)
-**优先级**: 🔴 高 (登记为 TD-014b)
-**预期工作量**: 2-3 小时
-**详见**: docs/Scout_技术债务清单.md TD-014b
-
-**重要**: 这条不是蓝图既有规则的实装漏洞,是**新设计提案**。
-蓝图 v1.61 没有明文规定估值 veto。详见 memory/scout_v161_veto_rules.md。
+d6 < 40 (PEG > 1.5) 时推荐等级强制降 B,与改进 1 反指标过滤层 Phase 2B 一起做。详见 TD-014b。
 
 
 ---
